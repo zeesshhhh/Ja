@@ -1732,6 +1732,16 @@ class _HomeState extends State<Home> {
     }
   }
 
+  Future<void> downloadLabAcc() async {
+    if (labAgg.isEmpty) return toast('Nothing scored yet. The first results appear about ${labHorizonBars} candles after the first signals.');
+    await downloadCsv('lab_indicator_accuracy.csv', labAggCsv(labAgg));
+  }
+
+  Future<void> downloadLabRows() async {
+    if (labRows.isEmpty) return toast('Nothing scored yet.');
+    await downloadCsv('lab_signal_snapshots.csv', labRowsCsv(labRows));
+  }
+
   Future<void> shareLabAcc() async {
     if (labAgg.isEmpty) return toast('Nothing scored yet. The first results appear about ${labHorizonBars} candles after the first signals.');
     final f = await _writeTemp('lab_indicator_accuracy.csv', labAggCsv(labAgg));
@@ -3124,7 +3134,7 @@ class _HomeState extends State<Home> {
       final url = feedUrl.replaceAll('feed.json', 'paper_log.csv');
       final r = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 30));
       if (r.statusCode != 200) {
-        toast('Log not found yet (HTTP ${r.statusCode}). It appears after the updated bot has run once and closed a trade.');
+        toast('Paper log is not published yet (HTTP ${r.statusCode}). It is published after a successful bot scan; it may contain only the CSV header until a paper position is opened.');
         return null;
       }
       return utf8.decode(r.bodyBytes);
@@ -3137,7 +3147,7 @@ class _HomeState extends State<Home> {
   Future<void> downloadBotLog() async {
     final csv = await fetchPaperCsv();
     if (csv == null) return;
-    await downloadCsv('paper_trading_log.csv', csv);
+    await downloadCsv('bot_paper_log.csv', csv);
   }
 
   Future<void> shareLog() async {
@@ -3145,7 +3155,7 @@ class _HomeState extends State<Home> {
     if (csv == null) return;
     try {
       final dir = await getTemporaryDirectory();
-      final f = File('${dir.path}/paper_trading_log.csv');
+      final f = File('${dir.path}/bot_paper_log.csv');
       await f.writeAsString(csv);
       await Share.shareXFiles([XFile(f.path, mimeType: 'text/csv')], subject: 'Paper trading log');
     } catch (e) {
@@ -3157,7 +3167,7 @@ class _HomeState extends State<Home> {
     final csv = await fetchPaperCsv();
     if (csv == null) return;
     await Clipboard.setData(ClipboardData(text: csv));
-    toast('Copied ${csv.trim().split('\n').length - 1} trades to the clipboard. Paste them into a chat or note.');
+    toast('Copied ${csv.trim().split('\n').length - 1} log rows (including the header) to the clipboard.');
   }
 
   Widget exportCard() {
@@ -3171,7 +3181,6 @@ class _HomeState extends State<Home> {
           const SizedBox(height: 8),
           Wrap(spacing: 8, children: [
             ElevatedButton.icon(onPressed: downloadBotLog, icon: const Icon(Icons.download), label: const Text('Download CSV')),
-            OutlinedButton.icon(onPressed: shareLog, icon: const Icon(Icons.share), label: const Text('Share CSV')),
             OutlinedButton.icon(onPressed: copyLog, icon: const Icon(Icons.copy), label: const Text('Copy to clipboard')),
           ]),
           const SizedBox(height: 6),
@@ -3377,12 +3386,9 @@ class _HomeState extends State<Home> {
             const SizedBox(height: 8),
             Wrap(spacing: 8, children: [
               ElevatedButton.icon(onPressed: downloadAppLog, icon: const Icon(Icons.download), label: const Text('Download app log')),
-              OutlinedButton.icon(onPressed: shareAppLog, icon: const Icon(Icons.share), label: const Text('Share app log')),
               OutlinedButton.icon(onPressed: copyAppLog, icon: const Icon(Icons.copy), label: const Text('Copy')),
               OutlinedButton.icon(onPressed: downloadBotLog, icon: const Icon(Icons.download), label: const Text('Download bot log')),
-              OutlinedButton.icon(onPressed: shareLog, icon: const Icon(Icons.smart_toy), label: const Text('Share bot log')),
               OutlinedButton.icon(onPressed: downloadAllLogs, icon: const Icon(Icons.download_for_offline), label: const Text('Download all logs')),
-              OutlinedButton.icon(onPressed: shareBothLogs, icon: const Icon(Icons.share), label: const Text('Share all logs')),
             ]),
             const SizedBox(height: 6),
             Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: trades.isEmpty ? null : resetPaper, icon: const Icon(Icons.delete_outline), label: const Text('Reset in-app paper account'))),
@@ -3499,10 +3505,9 @@ class _HomeState extends State<Home> {
             const Text('Accuracy table: one row per indicator and style. Snapshots: the raw vote of every indicator at each signal with what happened next (last 1,500). Send these to tune the bot.', style: TextStyle(fontSize: 12)),
             const SizedBox(height: 8),
             Wrap(spacing: 8, children: [
-              ElevatedButton.icon(onPressed: shareLabAcc, icon: const Icon(Icons.download), label: const Text('Accuracy table')),
-              OutlinedButton.icon(onPressed: shareLabRows, icon: const Icon(Icons.table_chart), label: const Text('Raw snapshots')),
+              ElevatedButton.icon(onPressed: downloadLabAcc, icon: const Icon(Icons.download), label: const Text('Download accuracy table')),
+              OutlinedButton.icon(onPressed: downloadLabRows, icon: const Icon(Icons.download), label: const Text('Download raw snapshots')),
               OutlinedButton.icon(onPressed: downloadAllLogs, icon: const Icon(Icons.download_for_offline), label: const Text('Download all logs')),
-              OutlinedButton.icon(onPressed: shareBothLogs, icon: const Icon(Icons.share), label: const Text('Share all logs')),
             ]),
             Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: resetLab, icon: const Icon(Icons.delete_outline), label: const Text('Reset Lab'))),
           ]),
