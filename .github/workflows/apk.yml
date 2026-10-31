@@ -26,6 +26,9 @@ jobs:
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <application#' $M
           sed -i 's#android:label="[^"]*"#android:label="Signal Bot"#' $M
           sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>\n    <uses-permission android:name="android.permission.VIBRATE"/>\n    <application#' $M
+          sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android"#<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"#' $M
+          sed -i 's#<application#<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>\n    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n    <application#' $M
+          sed -i 's#</application>#    <service android:name="com.dexterous.flutterlocalnotifications.ForegroundService" android:exported="false" android:foregroundServiceType="dataSync" tools:replace="android:foregroundServiceType"/>\n    </application>#' $M
           python3 - <<'PY'
           import glob
           p = (glob.glob('build_app/android/app/build.gradle.kts') or glob.glob('build_app/android/app/build.gradle'))[0]
