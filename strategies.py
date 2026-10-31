@@ -2,6 +2,8 @@
 included), i = index of the candle to evaluate. Only rows[:i+1] are used, so the same code serves
 live scanning (i = last closed candle) and the backtester."""
 
+from config import RR
+
 def sig(side, r, why, sl_atr=1.5, rr=2.0, sl=None, tp=None, min_rr=1.0):
     c = r.close
     if sl is None:
@@ -10,9 +12,11 @@ def sig(side, r, why, sl_atr=1.5, rr=2.0, sl=None, tp=None, min_rr=1.0):
     if not risk > 0:
         return None
     if tp is None:
-        tp = c + side * risk * rr
+        tp = c + side * risk * RR                               # fixed reward to risk from config (1:1)
     elif not (tp - c) * side >= min_rr * risk:
         return None
+    elif (tp - c) * side > RR * risk:
+        tp = c + side * risk * RR                               # structural target is further than 1R: take profit at 1R
     return {"side": side, "sl": float(sl), "tp": float(tp), "why": why}
 
 def _wick(r):

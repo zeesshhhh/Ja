@@ -5,7 +5,7 @@ import csv
 import json
 import os
 import pandas as pd
-from config import PAPER_START, PAPER_RISK
+from config import PAPER_START, PAPER_RISK, PAPER_MAX_OPEN, PAPER_MAX_PER_SIDE
 
 FILE, OLD_FILE, CSV_FILE = "docs/paper.json", "paper.json", "docs/paper_log.csv"
 COST_R = 0.05
@@ -61,6 +61,10 @@ def write_csv(p):
 
 def open_pos(p, symbol, s):
     if any(o["symbol"] == symbol and o["strategy"] == s["strategy"] for o in p["open"]):
+        return
+    if PAPER_MAX_OPEN is not None and len(p["open"]) >= PAPER_MAX_OPEN:    # optional total cap (None = unlimited)
+        return
+    if PAPER_MAX_PER_SIDE is not None and sum(o["side"] == s["side"] for o in p["open"]) >= PAPER_MAX_PER_SIDE:
         return
     risk = abs(s["entry"] - s["sl"])
     if not risk > 0:

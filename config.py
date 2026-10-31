@@ -29,13 +29,15 @@ BAR_MIN = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
 
 # risk and filters
 MIN_SCORE = 4                # swing score threshold (max 7)
-RR = 2.0
+RR = 1.0                     # reward to risk: target = 1x the stop distance (1:1), used by every strategy
 ATR_SL = 1.5
 NEWS_BLACKOUT_MIN = 45
 NEWS_FILTER = True
 FLOW_FILTER = True
 FOREX_SESSION = (7, 17)      # UTC hours; intraday forex strategies only fire inside this window
-ENABLED_STRATEGIES = None    # None = all strategies run
+# Forward paper results (63 closed): Day trading 0/24, Swing 0/7, Trend 30m, Quant, News, Breakout, Range all 0 wins.
+# Price action (+3.45R) and Intraday ORB (about break-even) held up, so only these four run for now. Set to None to run all.
+ENABLED_STRATEGIES = {"Price action", "Intraday ORB", "Position", "Reversal"}
 # Strategies that had profit factor > 1.1 in backtest_results.txt. Everything else is tagged "experimental"
 # in Telegram and the app until paper trading or a new backtest proves it. Update this after each backtest.
 PROVEN = {"Position", "Intraday ORB", "Day trading", "Reversal"}
@@ -61,6 +63,8 @@ FUTURES_EXCLUDE = {"BTC", "ETH", "SOL", "USDC", "FDUSD", "TUSD", "USDT", "DAI", 
 # paper trading
 PAPER_START = 10000
 PAPER_RISK = 0.01
+PAPER_MAX_OPEN = None        # None = unlimited open paper trades
+PAPER_MAX_PER_SIDE = None    # None = unlimited trades in the same direction
 
 # Higher-timeframe filter: a 5m/15m/30m/1h trend signal must not fight the 4h trend (EMA50 vs EMA200 and price vs EMA50).
 # Counter-trend strategies (Reversal, Mean reversion, Range, Price action) are exempt.
