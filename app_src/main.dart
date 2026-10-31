@@ -109,6 +109,15 @@ class Reading {
   const Reading(this.name, this.value, this.sig, [this.mr = false]);
 }
 
+// Indicators whose 'race' accuracy in the Lab (1,190 signal sets, Oct 30-31) was below 50%. They stay on screen and keep being
+// scored by the Lab, but are shown as "info only" and no longer vote in the verdict. Re-check after more Lab data.
+const droppedIndicators = <String>{
+  'EMA 20', 'EMA 30', 'EMA 50', 'EMA 100', 'EMA 200', 'SMA 20', 'SMA 30', 'SMA 50', 'SMA 200', 'VWAP (50)', 'VWMA (20)',
+  'Supertrend (10,3)', 'Ichimoku', 'Chandelier Exit (22,3)', 'Vortex (14)', 'Aroon (25)', 'ADX (14)', 'TRIX (15)', 'ROC (12)',
+  'Awesome Oscillator', 'Squeeze Momentum', 'OBV vs EMA21', 'Chaikin Money Flow (20)', 'Candle pattern',
+};
+bool isInfoOnly(Reading r) => r.mr || droppedIndicators.contains(r.name);
+
 class Analysis {
   final List<Reading> ma, osc, info;
   final int buys, sells, neutrals;
@@ -705,6 +714,34 @@ Analysis analyze(List<Candle> cs, int d) {
     }
     osc.add(Reading('Candle pattern', name, sg));
   }
+  // ---- candidate indicators: scored by the Lab but "info only" until the Lab shows a real edge (55%+ over 300+ results)
+  if (n >= 30) {
+    final r2 = rsiSeries(c, 2).last;
+    osc.add(Reading('RSI (2)', f1(r2), r2 < 10 ? 1 : r2 > 90 ? -1 : 0, true));
+    final m20 = smaLast(c, 20);
+    var sq = 0.0;
+    for (var i = n - 20; i < n; i++) {
+      sq += (c[i] - m20) * (c[i] - m20);
+    }
+    final sd = math.sqrt(sq / 20);
+    if (sd > 0) {
+      final zz = (last - m20) / sd;
+      osc.add(Reading('Z-score (20)', f1(zz), zz < -2 ? 1 : zz > 2 ? -1 : 0, true));
+    }
+    final e20 = emaSeries(c, 20);
+    final slope = (e20.last - e20[n - 4]) / (atr > 0 ? atr : 1);
+    osc.add(Reading('EMA20 slope (3 bars)', f1(slope), slope > 0.3 ? 1 : slope < -0.3 ? -1 : 0, true));
+    if (hasVol) {
+      var av = 0.0;
+      for (var i = n - 21; i < n - 1; i++) {
+        av += v[i];
+      }
+      av /= 20;
+      final rv = av > 0 ? v[n - 1] / av : 0.0;
+      final up = c[n - 1] > cs.last.open;
+      osc.add(Reading('Volume surge candle', '${f1(rv)}x', rv >= 1.8 ? (up ? 1 : -1) : 0, true));
+    }
+  }
   info.add(Reading('ATR (14)', '${f(atr)}  (${(atr / last * 100).toStringAsFixed(2)}%)', 0));
   if (n > 2) {
     final p = (h[n - 2] + l[n - 2] + c[n - 2]) / 3;
@@ -716,7 +753,7 @@ Analysis analyze(List<Candle> cs, int d) {
   // in every style and in the forward test. They stay visible (marked "info only") but no longer count towards the verdict.
   var b = 0, s = 0, z = 0;
   for (final r in [...ma, ...osc]) {
-    if (r.mr) continue;
+    if (isInfoOnly(r)) continue;
     if (r.sig > 0) {
       b++;
     } else if (r.sig < 0) {
@@ -731,7 +768,7 @@ Analysis analyze(List<Candle> cs, int d) {
   };
   var wsum = 0.0, ssum = 0.0;
   for (final r in [...ma, ...osc]) {
-    if (r.mr) continue;
+    if (isInfoOnly(r)) continue;
     final w = edgeWeight[r.name] ?? 1.0;
     wsum += w;
     ssum += w * r.sig;
@@ -2634,11 +2671,11 @@ class _HomeState extends State<Home> {
     if (rows.isEmpty) return const SizedBox.shrink();
     Color? col(int s) => s == 1 ? Colors.green : s == -1 ? Colors.red : null;
     String lab(int s) => s == 1 ? 'BUY' : s == -1 ? 'SELL' : 'NEUTRAL';
-    String tag(Reading r) => r.mr ? 'info only' : lab(r.sig);
+    String tag(Reading r) => isInfoOnly(r) ? 'info only' : lab(r.sig);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Padding(padding: const EdgeInsets.only(top: 10, bottom: 2), child: Text(title, style: const TextStyle(fontWeight: FontWeight.w700))),
       for (final r in rows)
-        _indicatorRow(r.name, title == 'Levels' ? r.value : '${r.value}  ${tag(r)}', r.mr ? null : col(r.sig)),
+        _indicatorRow(r.name, title == 'Levels' ? r.value : '${r.value}  ${tag(r)}', isInfoOnly(r) ? null : col(r.sig)),
     ]);
   }
 
