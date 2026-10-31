@@ -1052,6 +1052,26 @@ Future<void> notify(int id, String title, String body) async {
   } catch (_) {}
 }
 
+/// Keeps the app process alive (Android foreground service) while auto paper trading is on, so it keeps scanning when the app
+/// is minimized or the screen is off. Swiping the app away from recent apps still stops it.
+Future<void> setBackgroundService(bool on) async {
+  try {
+    final android = notifier.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (android == null) return;
+    if (on) {
+      await android.startForegroundService(
+        7001, 'Signal Bot is running', 'Auto paper trading is active. Tap to open.',
+        notificationDetails: const AndroidNotificationDetails('bg_service', 'Background running',
+            channelDescription: 'Keeps auto paper trading running when the app is minimized',
+            importance: Importance.low, priority: Priority.low, ongoing: true, playSound: false, enableVibration: false),
+        foregroundServiceTypes: {AndroidServiceForegroundType.foregroundServiceTypeDataSync},
+      );
+    } else {
+      await android.stopForegroundService();
+    }
+  } catch (_) {}
+}
+
 Future<void> notifyPaper(int id, String title, String body) async {
   try {
     const details = NotificationDetails(
@@ -1795,6 +1815,7 @@ class _HomeState extends State<Home> {
       }
     } catch (_) {}
     paperLoaded = true;
+    if (autoPaper) setBackgroundService(true);
     if (mounted) setState(() {});
     checkPaper();
     paperScanCycle();                 // catches up on candles that formed while the app was closed
@@ -2064,6 +2085,7 @@ class _HomeState extends State<Home> {
   Future<void> setAutoPaper(bool v) async {
     setState(() => autoPaper = v);
     await savePaper();
+    setBackgroundService(v);
     if (v) paperScanCycle();
   }
 
