@@ -207,7 +207,11 @@ def scan():
             continue
         fnotes = flow_notes.get(1 if nb > ns else -1, [])
         extra = f"Fear & Greed: {fg[0]} ({fg[1]})" if fg and asset == "crypto" else ""
-        telegram.send(message(sym, keep, sc, top, fnotes, special.order_book(sym) if asset == "crypto" else None, extra))
+
+        # Persist paper positions BEFORE attempting external notification or feed work.
+        # A Telegram/API outage must never prevent a valid signal from entering the
+        # paper ledger. Save after each symbol group so a later exception cannot
+        # discard trades already accepted during this scan.
         feed.add(fd, sym, keep)
         for s in keep:
             R = rows[sym].get(s["tf"])
@@ -222,6 +226,14 @@ def scan():
                 except Exception:
                     pass
             paper.open_pos(ps, sym, {**s, "ctx": ctx})
+        paper.save(ps)
+
+        # Notifications are best-effort and cannot block the trading ledger.
+        try:
+            telegram.send(message(sym, keep, sc, top, fnotes,
+                                  special.order_book(sym) if asset == "crypto" else None, extra))
+        except Exception as e:
+            print("Telegram message error", sym, e)
 
     for a, b in PAIRS:
         try:
