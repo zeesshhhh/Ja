@@ -64,6 +64,7 @@ weights are unchanged and the lab keeps collecting.
   a line under the Final call in Markets).
 * **Dashboard**: signals (session), executed, open, closed, wins, losses, win rate, TP rate, SL rate, average win/loss, net P&L, profit factor,
   expectancy, max drawdown, direction-right vs profitable, plus breakdowns by timeframe, direction, ADX range, market regime and agreeing indicator.
+* **Amount per trade (USD)**: new input in the Paper settings. Typed amount = position size, so profit/loss = price move % x amount and a stop-out loses about amount x stop distance %. Empty = the old rule (risk 1% of the paper account). New `Amount` column in the live board and `amount_usd` in the CSV. The bot has the same option: `PAPER_AMOUNT` in `config.py` (None = old rule). The 1:1 reward-to-risk is unchanged.
 * Trades now store `market_regime` and `agreeing_indicators` (two new CSV columns at the end; old saved trades still load).
 
 ## 6. What was NOT done, and why
@@ -82,4 +83,4 @@ weights are unchanged and the lab keeps collecting.
 * Not tested: real-device rendering, restart behaviour, offline handling on a phone, exchange symbol mapping against live APIs.
 
 ## 8. Modified files
-`app_src/main.dart`, `tests/test_logic.py` (new), `PERFORMANCE_REPORT.md` (new). Everything else is unchanged from your upload.
+`app_src/main.dart`, `config.py` and `paper.py` (new `PAPER_AMOUNT` option only), `tests/test_logic.py` (new), `PERFORMANCE_REPORT.md` (new). Everything else is unchanged from your upload.

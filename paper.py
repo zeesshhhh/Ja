@@ -10,7 +10,7 @@ import math
 import os
 import tempfile
 import pandas as pd
-from config import PAPER_START, PAPER_RISK, PAPER_MAX_OPEN, PAPER_MAX_PER_SIDE
+from config import PAPER_START, PAPER_RISK, PAPER_AMOUNT, PAPER_MAX_OPEN, PAPER_MAX_PER_SIDE
 
 FILE, OLD_FILE, CSV_FILE = "docs/paper.json", "paper.json", "docs/paper_log.csv"
 COST_R = 0.05
@@ -137,7 +137,10 @@ def open_pos(p, symbol, s):
     risk = abs(entry - sl)
     if risk <= 0:
         return False
-    risk_cash = float(p["equity"]) * float(PAPER_RISK)
+    if PAPER_AMOUNT:                                   # fixed USD position size: a stop-out loses amount x stop distance %
+        risk_cash = float(PAPER_AMOUNT) * risk / entry
+    else:
+        risk_cash = float(p["equity"]) * float(PAPER_RISK)
     if not math.isfinite(risk_cash) or risk_cash <= 0:
         return False
     p["next_id"] = max(int(p.get("next_id", 0) or 0),

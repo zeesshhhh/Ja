@@ -63,6 +63,7 @@ FUTURES_EXCLUDE = {"BTC", "ETH", "SOL", "USDC", "FDUSD", "TUSD", "USDT", "DAI", 
 # paper trading
 PAPER_START = 10000
 PAPER_RISK = 0.01
+PAPER_AMOUNT = None          # USD position size per paper trade; None = risk PAPER_RISK of the account instead
 PAPER_MAX_OPEN = None        # None = unlimited open paper trades
 PAPER_MAX_PER_SIDE = None    # None = unlimited trades in the same direction
 
