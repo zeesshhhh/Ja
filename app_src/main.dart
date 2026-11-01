@@ -1217,6 +1217,7 @@ class AppTrade {
   final String coin, tf, source, verdict;
   final String regime, inds;   // market regime at entry and the indicators that agreed ('|' separated)
   final double entry, sl, tp, score, riskCash;
+  final double amount;         // position size in USD chosen for this trade (0 = older trade, sized by the 1% risk rule)
   final double? adx, atrPct, rvol, ext;
   final int quality, htfAgree, btc;
   final DateTime opened;
@@ -1229,10 +1230,12 @@ class AppTrade {
       required this.side, required this.buys, required this.sells, required this.neutrals, required this.mood,
       required this.entry, required this.sl, required this.tp, required this.score, required this.riskCash,
       required this.adx, required this.atrPct, required this.opened,
-      this.rvol, this.ext, this.quality = 0, this.htfAgree = 0, this.btc = 0, this.regime = '', this.inds = ''});
+      this.rvol, this.ext, this.quality = 0, this.htfAgree = 0, this.btc = 0, this.regime = '', this.inds = '', this.amount = 0});
 
   bool get isOpen => status == 'open';
   double get riskPx => (entry - sl).abs();
+  /// Position size in USD: the amount typed in Settings, or the size implied by the 1% risk rule.
+  double get notional => amount > 0 ? amount : (riskPx > 0 ? riskCash * entry / riskPx : 0.0);
   double get pnl => r * riskCash;
   double get plannedRr => riskPx == 0 ? 0 : (tp - entry).abs() / riskPx;
 
@@ -1243,7 +1246,7 @@ class AppTrade {
         'status': status, 'reason': reason, 'mfe': mfe, 'mae': mae, 'exit': exitPx, 'r': r, 'amb': ambiguous,
         'closed': closed?.toIso8601String(),
         'rvol': cleanNum(rvol), 'ext': cleanNum(ext), 'q': quality, 'htf': htfAgree, 'btc': btc,
-        'regime': regime, 'inds': inds,
+        'regime': regime, 'inds': inds, 'amt': amount,
       };
 
   factory AppTrade.fromJson(Map<String, dynamic> j) {
@@ -1256,7 +1259,7 @@ class AppTrade {
       atrPct: (j['atrPct'] as num?)?.toDouble(), opened: DateTime.tryParse('${j['opened']}') ?? DateTime.now(),
       rvol: (j['rvol'] as num?)?.toDouble(), ext: (j['ext'] as num?)?.toDouble(), quality: (j['q'] as num?)?.toInt() ?? 0,
       htfAgree: (j['htf'] as num?)?.toInt() ?? 0, btc: (j['btc'] as num?)?.toInt() ?? 0,
-      regime: '${j['regime'] ?? ''}', inds: '${j['inds'] ?? ''}',
+      regime: '${j['regime'] ?? ''}', inds: '${j['inds'] ?? ''}', amount: (j['amt'] as num?)?.toDouble() ?? 0,
     );
     t.status = '${j['status'] ?? 'open'}';
     t.reason = '${j['reason'] ?? ''}';
@@ -1338,7 +1341,7 @@ String tradesToCsv(List<AppTrade> trades) {
   const cols = ['id', 'status', 'opened_utc', 'closed_utc', 'hours_held', 'symbol', 'strategy', 'tf', 'side', 'verdict', 'score',
     'entry', 'sl', 'tp', 'risk_pct', 'planned_rr', 'exit_price', 'exit_reason', 'same_candle_sl_tp', 'r_multiple', 'pnl_usd',
     'mfe_r', 'mae_r', 'buys', 'neutrals', 'sells', 'adx', 'atr_pct', 'news_mood', 'hour_utc', 'weekday',
-    'quality', 'htf_agree', 'rvol', 'ext_atr', 'btc_regime', 'market_regime', 'agreeing_indicators'];
+    'quality', 'htf_agree', 'rvol', 'ext_atr', 'btc_regime', 'market_regime', 'agreeing_indicators', 'amount_usd'];
   String r(double? v, int n) => v == null ? '' : v.toStringAsFixed(n);
   final out = StringBuffer(cols.join(',')).toString();
   final lines = <String>[out];
@@ -1352,7 +1355,7 @@ String tradesToCsv(List<AppTrade> trades) {
       t.entry, t.sl, t.tp, r(t.entry == 0 ? null : t.riskPx / t.entry * 100, 3), r(t.plannedRr, 2),
       done ? t.exitPx : '', done ? t.reason : '', done ? t.ambiguous : '', done ? r(t.r, 3) : '', done ? r(t.pnl, 2) : '',
       r(t.mfe, 2), r(t.mae, 2), t.buys, t.neutrals, t.sells, r(t.adx, 1), r(t.atrPct, 3), t.mood, u.hour, u.weekday,
-      t.quality, t.htfAgree, r(t.rvol, 2), r(t.ext, 2), t.btc, t.regime, t.inds,
+      t.quality, t.htfAgree, r(t.rvol, 2), r(t.ext, 2), t.btc, t.regime, t.inds, r(t.notional, 2),
     ];
     lines.add(row.map(csvCell).join(','));
   }
@@ -1576,6 +1579,8 @@ class _HomeState extends State<Home> {
   Timer? liveTimer;
   final List<GateReject> gateRejects = [];        // most recent signals the gate turned into NO TRADE
   final Map<String, String> gateLast = {};        // coin|tf -> 'hh:mm|OK' or 'hh:mm|reason'
+  double paperAmount = 0;                         // USD per paper trade typed in Settings; 0 = risk 1% of the account
+  final TextEditingController paperAmountCtl = TextEditingController();
   int paperSignals = 0;                           // signals that passed the score/ADX pre-filter this session
   final Map<String, Analysis?> _htfCache = {};
   DateTime _htfCacheAt = DateTime(2000);
@@ -1630,6 +1635,7 @@ class _HomeState extends State<Home> {
     labTimer?.cancel();
     uiTimer?.cancel();
     liveTimer?.cancel();
+    paperAmountCtl.dispose();
     super.dispose();
   }
 
@@ -1907,6 +1913,8 @@ class _HomeState extends State<Home> {
       autoPaper = p.getBool('app_paper_auto') ?? false;
       paperMinScore = p.getDouble('app_paper_min') ?? 0.50;
       paperMaxOpen = p.getInt('app_paper_max') ?? 1000000;
+      paperAmount = p.getDouble('app_paper_amount') ?? 0;
+      paperAmountCtl.text = paperAmount > 0 ? paperAmount.toStringAsFixed(paperAmount == paperAmount.roundToDouble() ? 0 : 2) : '';
       paperCoins = p.getInt('app_paper_coins') ?? 20;
       final tl = p.getStringList('app_paper_tfs');
       if (tl != null && tl.isNotEmpty) paperTfs = tl.toSet();
@@ -1953,6 +1961,7 @@ class _HomeState extends State<Home> {
       await p.setBool('app_paper_auto', autoPaper);
       await p.setDouble('app_paper_min', paperMinScore);
       await p.setInt('app_paper_max', paperMaxOpen);
+      await p.setDouble('app_paper_amount', paperAmount);
       await p.setInt('app_paper_q', paperMinQ);
       await p.setInt('app_paper_adx', paperMinAdx);
       await p.setInt('app_paper_coins', paperCoins);
@@ -1968,11 +1977,15 @@ class _HomeState extends State<Home> {
     if (plan[2] < 0.75) return null;
     if (a.atr / a.last * 100 > 8 || plan[0] <= 0 || plan[1] <= 0) return null;   // illiquid coins with absurd stops, or a target below zero
     if (trades.any((t) => t.isOpen && t.coin == coin && t.tf == tf)) return null;
+    final stopDist = (a.last - plan[0]).abs();
+    if (stopDist <= 0) return null;
+    // manual amount: P&L = price move % x amount, so a stop-out loses amount x stop distance %. Empty = risk 1% of the paper account.
+    final riskUsd = paperAmount > 0 ? paperAmount * stopDist / a.last : paperEquity * paperRisk;
     final id = trades.isEmpty ? 1 : trades.map((t) => t.id).reduce(math.max) + 1;
     final t = AppTrade(
       id: id, coin: coin, tf: tf, source: source, verdict: a.verdict, side: a.side, buys: a.buys, sells: a.sells,
       neutrals: a.neutrals, mood: news.isEmpty ? 0 : newsScore(coin), entry: a.last, sl: plan[0], tp: plan[1],
-      score: a.score, riskCash: paperEquity * paperRisk, adx: cleanNum(a.adx),
+      score: a.score, riskCash: riskUsd, amount: paperAmount > 0 ? paperAmount : 0, adx: cleanNum(a.adx),
       atrPct: a.last == 0 ? null : cleanNum(a.atr / a.last * 100), opened: DateTime.now(),
       rvol: q?['rvol'] as double?, ext: q?['ext'] as double?, quality: (q?['q'] as int?) ?? 0,
       htfAgree: (q?['htf'] as int?) ?? 0, btc: (q?['btc'] as int?) ?? 0,
@@ -3471,6 +3484,7 @@ class _HomeState extends State<Home> {
         DataCell(Text('${t.coin} ${t.tf}', style: const TextStyle(fontWeight: FontWeight.w600))),
         DataCell(Text(q?.source ?? exchangeLabel(t.coin), style: const TextStyle(fontSize: 11))),
         DataCell(Text(t.side == 1 ? 'BUY' : 'SELL', style: TextStyle(color: t.side == 1 ? Colors.green : Colors.red, fontWeight: FontWeight.w700))),
+        DataCell(Text('\$${t.notional.toStringAsFixed(0)}')),
         DataCell(Text(fmtPrice(t.entry))),
         DataCell(Text(p == null ? '-' : fmtPrice(p.px), style: TextStyle(fontWeight: FontWeight.w700, color: col))),
         DataCell(Text(fmtPrice(t.tp))),
@@ -3512,7 +3526,7 @@ class _HomeState extends State<Home> {
             dataRowMinHeight: 36,
             dataRowMaxHeight: 40,
             columns: const [
-              DataColumn(label: Text('Symbol')), DataColumn(label: Text('Exchange')), DataColumn(label: Text('Side')),
+              DataColumn(label: Text('Symbol')), DataColumn(label: Text('Exchange')), DataColumn(label: Text('Side')), DataColumn(label: Text('Amount')),
               DataColumn(label: Text('Entry')), DataColumn(label: Text('Current rate')), DataColumn(label: Text('TP')),
               DataColumn(label: Text('SL')), DataColumn(label: Text('Unrealized P&L')), DataColumn(label: Text('P&L %')),
               DataColumn(label: Text('TP progress')), DataColumn(label: Text('SL distance')), DataColumn(label: Text('Status')),
@@ -3708,6 +3722,26 @@ class _HomeState extends State<Home> {
               for (final n in [20, 50, 100, 1000000])
                 ChoiceChip(label: Text(n >= 1000000 ? 'No limit' : '$n'), selected: paperMaxOpen == n, onSelected: (_) { setState(() => paperMaxOpen = n); savePaper(); }),
             ]),
+            const SizedBox(height: 8),
+            const Text('Amount per trade (USD)', style: TextStyle(fontSize: 12)),
+            TextField(
+              controller: paperAmountCtl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(isDense: true, border: OutlineInputBorder(), prefixText: '\$ ', hintText: 'Empty = risk 1% of the paper account'),
+              onChanged: (v) {
+                final x = double.tryParse(v.trim().replaceAll(',', '.'));
+                setState(() => paperAmount = x != null && x > 0 ? x : 0);
+                savePaper();
+              },
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                  paperAmount > 0
+                      ? 'Each new trade uses \$${paperAmount.toStringAsFixed(2)} of position size. Profit and loss = the price move in % x this amount. Applies to new trades only; open trades keep their size.'
+                      : 'Auto: each new trade risks 1% of the paper account (the stop-out loss), so the position size changes with each stop distance.',
+                  style: const TextStyle(fontSize: 11)),
+            ),
             const SizedBox(height: 6),
             const Text('Stop and target come from the same trade plan shown in Markets. Trades use a 1:1 reward to risk, one open trade per coin and timeframe, and none open during a high-impact news window. Same-candle stop and target counts as a loss, and 0.05R is charged for fees.', style: TextStyle(fontSize: 11)),
           ]),
