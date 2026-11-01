@@ -1211,6 +1211,12 @@ const gateMinScoreAdd = {1: 0.0, -1: 0.0};       // extra score required on top 
 const gateSrMinAtr = 0.5;                        // opposing support/resistance must be at least this many ATR away
 const gateLateMoveAtr = 3.0;                     // max move in the trade direction over the last 5 candles
 const gateCandleBodyAtr = 0.7;                   // reject if the last closed candle is a strong move against the signal
+// EXPERIMENT (Nov 1 Lab): trend SELLs were opened while price was already oversold (97 of 105 had a stretch indicator at oversold)
+// and won 18%. Veto a trend trade when at least this many of the stretch indicators say price is already stretched AGAINST the
+// direction (oversold for a SELL, overbought for a BUY). 0 = off. BUY is off because the same test blocked mostly winning BUYs.
+// One 40 minute window in a rising market: re-test on a falling day before trusting it.
+const gateStretchVeto = {1: 0, -1: 2};
+const stretchInds = ['RSI (14)', 'Z-score (20)', 'Bollinger %B (20,2)', 'CCI (20)', 'MFI (14)', 'RSI (2)'];
 
 /// Mean-reversion BUY setup (experimental, tracked as its own strategy "App MR"). The Lab's best indicators (Z-score, RSI(2), CCI,
 /// Bollinger %B, MFI, Stochastic RSI, Williams %R) all measure "how stretched is price", so they are treated as one idea:
@@ -1236,7 +1242,7 @@ MrSignal? mrSignal(Analysis ac) {
   final z = sigOf(ac, 'Z-score (20)');
   if (z == 0 || (z == -1 && !mrAllowSell)) return null;
   final names = <String>['Z-score (20)'];
-  for (final n in const ['RSI (2)', 'CCI (20)', 'Bollinger %B (20,2)', 'MFI (14)', 'Stochastic RSI', 'Williams %R (14)']) {
+  for (final n in const ['RSI (2)', 'RSI (14)', 'CCI (20)', 'Bollinger %B (20,2)', 'MFI (14)', 'Stochastic RSI', 'Williams %R (14)']) {
     if (sigOf(ac, n) == z) names.add(n);
   }
   if (names.length < 2) return null;
@@ -1392,6 +1398,81 @@ String tradesToCsv(List<AppTrade> trades) {
       t.quality, t.htfAgree, r(t.rvol, 2), r(t.ext, 2), t.btc, t.regime, t.inds, r(t.notional, 2), t.path,
     ];
     lines.add(row.map(csvCell).join(','));
+  }
+  return lines.join('\n') + '\n';
+}
+
+String stratLabel(AppTrade t) => t.source == 'auto' ? 'Trend (auto)' : t.source == 'MR' ? 'Mean reversion (MR)' : 'Manual';
+
+/// Profit breakdown, one row per (dimension, key): which coins, timeframes, indicators, sides, hours and regimes make money.
+/// Only closed trades count; results are net of the paper fee. Rows with fewer than 10 trades are labelled "too few trades".
+/// The indicator rows use the indicators that AGREED with the trade direction at entry (the "agreeing_indicators" column).
+String profitAnalysisCsv(List<AppTrade> all) {
+  final closed = all.where((t) => !t.isOpen).toList();
+  const minN = 10;
+  final groups = <String, Map<String, List<AppTrade>>>{};
+  void add(String dim, String key, AppTrade t) {
+    if (key.isEmpty) return;
+    final m = groups.putIfAbsent(dim, () => <String, List<AppTrade>>{});
+    m.putIfAbsent(key, () => <AppTrade>[]).add(t);
+  }
+  for (final t in closed) {
+    final side = t.side == 1 ? 'BUY' : 'SELL';
+    final adx = t.adx;
+    add('strategy', stratLabel(t), t);
+    add('timeframe', t.tf, t);
+    add('side', side, t);
+    add('coin', t.coin, t);
+    add('coin+timeframe', '${t.coin} ${t.tf}', t);
+    add('coin+side', '${t.coin} $side', t);
+    add('hour_utc', t.opened.toUtc().hour.toString().padLeft(2, '0'), t);
+    add('score_band', t.score.abs() >= .5 ? 'strong 0.5+' : t.score.abs() >= .35 ? 'medium 0.35-0.5' : 'weak 0.2-0.35', t);
+    add('adx_band', adx == null ? '' : adx < 20 ? 'ADX under 20' : adx < 25 ? 'ADX 20-25' : 'ADX 25+', t);
+    add('regime', t.regime, t);
+    for (final ind in t.inds.split('|')) {
+      if (ind.isEmpty) continue;
+      add('indicator', ind, t);
+      add('indicator+timeframe', '$ind ${t.tf}', t);
+      add('indicator+side', '$ind $side', t);
+    }
+  }
+  const cols = ['dimension', 'key', 'trades', 'wins', 'losses', 'win_rate_pct', 'net_r', 'avg_r', 'profit_factor', 'pnl_usd',
+    'avg_mfe_r', 'avg_mae_r', 'tp_hits', 'sl_hits', 'verdict'];
+  final lines = <String>[cols.join(',')];
+  for (final dim in groups.keys) {
+    final entries = groups[dim]!.entries.toList()
+      ..sort((a, b) => PStats(b.value).sumR.compareTo(PStats(a.value).sumR));
+    for (final e in entries) {
+      final st = PStats(e.value);
+      var pnl = 0.0, mfe = 0.0, mae = 0.0;
+      for (final t in e.value) {
+        pnl += t.pnl;
+        mfe += t.mfe;
+        mae += t.mae;
+      }
+      final n = e.value.length;
+      final verdict = st.n < minN ? 'too few trades' : (st.avgR > 0 && st.pf > 1 ? 'PROFITABLE' : 'losing');
+      lines.add([dim, e.key, st.n, st.wins, st.n - st.wins, st.winPct.toStringAsFixed(1), st.sumR.toStringAsFixed(2),
+        st.avgR.toStringAsFixed(3), st.pf.toStringAsFixed(2), pnl.toStringAsFixed(2), (mfe / n).toStringAsFixed(2),
+        (mae / n).toStringAsFixed(2), st.tp, st.sl, verdict].map(csvCell).join(','));
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+/// One row per closed trade and agreeing indicator (long format), for pivot tables: indicator x timeframe x coin x result.
+String tradeIndicatorsCsv(List<AppTrade> all) {
+  const cols = ['trade_id', 'opened_utc', 'symbol', 'timeframe', 'side', 'strategy', 'regime', 'indicator', 'r_multiple', 'win',
+    'exit_reason', 'score', 'adx', 'hour_utc'];
+  final lines = <String>[cols.join(',')];
+  for (final t in all.where((x) => !x.isOpen)) {
+    final adx = t.adx;
+    for (final ind in t.inds.split('|')) {
+      if (ind.isEmpty) continue;
+      lines.add([t.id, t.opened.toUtc().toIso8601String(), t.coin, t.tf, t.side == 1 ? 'BUY' : 'SELL', stratLabel(t), t.regime,
+        ind, t.r.toStringAsFixed(3), t.r > 0 ? 1 : 0, t.reason, t.score.toStringAsFixed(3),
+        adx == null ? '' : adx.toStringAsFixed(1), t.opened.toUtc().hour].map(csvCell).join(','));
+    }
   }
   return lines.join('\n') + '\n';
 }
@@ -2108,6 +2189,16 @@ class _HomeState extends State<Home> {
     if (veto == null && ac.score.abs() < paperMinScore + (gateMinScoreAdd[side] ?? 0.0)) {
       veto = 'score ${ac.score.abs().toStringAsFixed(2)} is below the ${side == 1 ? 'BUY' : 'SELL'} minimum';
     }
+    if (veto == null) {
+      final minStretch = gateStretchVeto[side] ?? 0;
+      if (minStretch > 0) {
+        var stretched = 0;
+        for (final sn in stretchInds) {
+          if (sigOf(ac, sn) == -side) stretched++;   // +1 (oversold) is against a SELL, -1 (overbought) against a BUY
+        }
+        if (stretched >= minStretch) veto = '$stretched stretch indicators say price is already ${side == -1 ? 'oversold' : 'overbought'}';
+      }
+    }
     // higher timeframes
     final idx = mtfList.indexOf(tf);
     int htfSide(Analysis? a) => a?.side ?? 0;
@@ -2429,6 +2520,31 @@ class _HomeState extends State<Home> {
     if (trades.isEmpty) return toast('No in-app paper trades yet.');
     await Clipboard.setData(ClipboardData(text: tradesToCsv(trades)));
     toast('Copied ${trades.length} trades to the clipboard.');
+  }
+
+  Future<void> downloadProfitLog() async {
+    if (!trades.any((t) => !t.isOpen)) return toast('No closed in-app trades yet.');
+    await downloadCsv('app_profit_analysis.csv', profitAnalysisCsv(trades));
+  }
+
+  /// Shares the trade log, the profit breakdown and the per-indicator rows together in one share sheet.
+  Future<void> shareDetailLogs() async {
+    if (!trades.any((t) => !t.isOpen)) return toast('No closed in-app trades yet.');
+    final files = <XFile>[];
+    for (final e in {
+      'app_paper_trades.csv': tradesToCsv(trades),
+      'app_profit_analysis.csv': profitAnalysisCsv(trades),
+      'app_trade_indicators.csv': tradeIndicatorsCsv(trades),
+    }.entries) {
+      final f = await _writeTemp(e.key, e.value);
+      if (f != null) files.add(XFile(f.path, mimeType: 'text/csv'));
+    }
+    if (files.isEmpty) return;
+    try {
+      await Share.shareXFiles(files, subject: 'Detail logs (trades, profit analysis, indicators)');
+    } catch (e) {
+      toast('Could not share the files: $e');
+    }
   }
 
   Future<void> downloadAllLogs() async {
@@ -4041,10 +4157,14 @@ class _HomeState extends State<Home> {
             const SizedBox(height: 8),
             Wrap(spacing: 8, children: [
               ElevatedButton.icon(onPressed: downloadAppLog, icon: const Icon(Icons.download), label: const Text('Download app log')),
+              ElevatedButton.icon(onPressed: downloadProfitLog, icon: const Icon(Icons.insights), label: const Text('Download profit analysis')),
+              OutlinedButton.icon(onPressed: shareDetailLogs, icon: const Icon(Icons.share), label: const Text('Share detail logs')),
               OutlinedButton.icon(onPressed: copyAppLog, icon: const Icon(Icons.copy), label: const Text('Copy')),
               OutlinedButton.icon(onPressed: downloadBotLog, icon: const Icon(Icons.download), label: const Text('Download bot log')),
               OutlinedButton.icon(onPressed: downloadAllLogs, icon: const Icon(Icons.download_for_offline), label: const Text('Download all logs')),
             ]),
+            const SizedBox(height: 6),
+            const Text('Profit analysis: one row per coin, timeframe, indicator, side, hour and regime with trades, win rate, net R, profit factor and a PROFITABLE / losing label (rows under 10 trades say "too few trades"). Detail logs also include one row per trade and agreeing indicator for pivot tables.', style: TextStyle(fontSize: 11)),
             const SizedBox(height: 6),
             Align(alignment: Alignment.centerRight, child: TextButton.icon(onPressed: trades.isEmpty ? null : resetPaper, icon: const Icon(Icons.delete_outline), label: const Text('Reset in-app paper account'))),
           ]),
