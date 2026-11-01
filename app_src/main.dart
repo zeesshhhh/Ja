@@ -1212,11 +1212,44 @@ const gateSrMinAtr = 0.5;                        // opposing support/resistance 
 const gateLateMoveAtr = 3.0;                     // max move in the trade direction over the last 5 candles
 const gateCandleBodyAtr = 0.7;                   // reject if the last closed candle is a strong move against the signal
 
+/// Mean-reversion BUY setup (experimental, tracked as its own strategy "App MR"). The Lab's best indicators (Z-score, RSI(2), CCI,
+/// Bollinger %B, MFI, Stochastic RSI, Williams %R) all measure "how stretched is price", so they are treated as one idea:
+/// the Z-score must fire and at least one more must agree. Lab data (Nov 1): after such BUY signals price rose 64% of the time,
+/// average +0.43 ATR (n=42, both halves positive). SELL signals went the wrong way (price rose +0.6 ATR on average), so SELL is off.
+const mrAllowSell = false;
+
+class MrSignal {
+  final int side;
+  final String inds;   // '|' separated names of the stretch indicators that agreed
+  const MrSignal(this.side, this.inds);
+}
+
+int sigOf(Analysis a, String name) {
+  for (final r in [...a.ma, ...a.osc]) {
+    if (r.name == name) return r.sig;
+  }
+  return 0;
+}
+
+MrSignal? mrSignal(Analysis ac) {
+  if (ac.atr <= 0 || ac.last <= 0) return null;
+  final z = sigOf(ac, 'Z-score (20)');
+  if (z == 0 || (z == -1 && !mrAllowSell)) return null;
+  final names = <String>['Z-score (20)'];
+  for (final n in const ['RSI (2)', 'CCI (20)', 'Bollinger %B (20,2)', 'MFI (14)', 'Stochastic RSI', 'Williams %R (14)']) {
+    if (sigOf(ac, n) == z) names.add(n);
+  }
+  if (names.length < 2) return null;
+  return MrSignal(z, names.join('|'));
+}
+
 class AppTrade {
   final int id, side, buys, sells, neutrals, mood;
   final String coin, tf, source, verdict;
   final String regime, inds;   // market regime at entry and the indicators that agreed ('|' separated)
   final double entry, sl, tp, score, riskCash;
+  String path;                 // unrealized R every ~5 minutes while the trade is open (';' separated), for testing exits later
+  DateTime? pathAt;
   final double amount;         // position size in USD chosen for this trade (0 = older trade, sized by the 1% risk rule)
   final double? adx, atrPct, rvol, ext;
   final int quality, htfAgree, btc;
@@ -1230,7 +1263,7 @@ class AppTrade {
       required this.side, required this.buys, required this.sells, required this.neutrals, required this.mood,
       required this.entry, required this.sl, required this.tp, required this.score, required this.riskCash,
       required this.adx, required this.atrPct, required this.opened,
-      this.rvol, this.ext, this.quality = 0, this.htfAgree = 0, this.btc = 0, this.regime = '', this.inds = '', this.amount = 0});
+      this.rvol, this.ext, this.quality = 0, this.htfAgree = 0, this.btc = 0, this.regime = '', this.inds = '', this.amount = 0, this.path = ''});
 
   bool get isOpen => status == 'open';
   double get riskPx => (entry - sl).abs();
@@ -1246,7 +1279,7 @@ class AppTrade {
         'status': status, 'reason': reason, 'mfe': mfe, 'mae': mae, 'exit': exitPx, 'r': r, 'amb': ambiguous,
         'closed': closed?.toIso8601String(),
         'rvol': cleanNum(rvol), 'ext': cleanNum(ext), 'q': quality, 'htf': htfAgree, 'btc': btc,
-        'regime': regime, 'inds': inds, 'amt': amount,
+        'regime': regime, 'inds': inds, 'amt': amount, 'path': path,
       };
 
   factory AppTrade.fromJson(Map<String, dynamic> j) {
@@ -1259,7 +1292,7 @@ class AppTrade {
       atrPct: (j['atrPct'] as num?)?.toDouble(), opened: DateTime.tryParse('${j['opened']}') ?? DateTime.now(),
       rvol: (j['rvol'] as num?)?.toDouble(), ext: (j['ext'] as num?)?.toDouble(), quality: (j['q'] as num?)?.toInt() ?? 0,
       htfAgree: (j['htf'] as num?)?.toInt() ?? 0, btc: (j['btc'] as num?)?.toInt() ?? 0,
-      regime: '${j['regime'] ?? ''}', inds: '${j['inds'] ?? ''}', amount: (j['amt'] as num?)?.toDouble() ?? 0,
+      regime: '${j['regime'] ?? ''}', inds: '${j['inds'] ?? ''}', amount: (j['amt'] as num?)?.toDouble() ?? 0, path: '${j['path'] ?? ''}',
     );
     t.status = '${j['status'] ?? 'open'}';
     t.reason = '${j['reason'] ?? ''}';
@@ -1342,7 +1375,7 @@ String tradesToCsv(List<AppTrade> trades) {
   const cols = ['id', 'status', 'opened_utc', 'closed_utc', 'hours_held', 'symbol', 'strategy', 'tf', 'side', 'verdict', 'score',
     'entry', 'sl', 'tp', 'risk_pct', 'planned_rr', 'exit_price', 'exit_reason', 'same_candle_sl_tp', 'r_multiple', 'pnl_usd',
     'mfe_r', 'mae_r', 'buys', 'neutrals', 'sells', 'adx', 'atr_pct', 'news_mood', 'hour_utc', 'weekday',
-    'quality', 'htf_agree', 'rvol', 'ext_atr', 'btc_regime', 'market_regime', 'agreeing_indicators', 'amount_usd'];
+    'quality', 'htf_agree', 'rvol', 'ext_atr', 'btc_regime', 'market_regime', 'agreeing_indicators', 'amount_usd', 'r_path'];
   String r(double? v, int n) => v == null ? '' : v.toStringAsFixed(n);
   final out = StringBuffer(cols.join(',')).toString();
   final lines = <String>[out];
@@ -1356,7 +1389,7 @@ String tradesToCsv(List<AppTrade> trades) {
       t.entry, t.sl, t.tp, r(t.entry == 0 ? null : t.riskPx / t.entry * 100, 3), r(t.plannedRr, 2),
       done ? t.exitPx : '', done ? t.reason : '', done ? t.ambiguous : '', done ? r(t.r, 3) : '', done ? r(t.pnl, 2) : '',
       r(t.mfe, 2), r(t.mae, 2), t.buys, t.neutrals, t.sells, r(t.adx, 1), r(t.atrPct, 3), t.mood, u.hour, u.weekday,
-      t.quality, t.htfAgree, r(t.rvol, 2), r(t.ext, 2), t.btc, t.regime, t.inds, r(t.notional, 2),
+      t.quality, t.htfAgree, r(t.rvol, 2), r(t.ext, 2), t.btc, t.regime, t.inds, r(t.notional, 2), t.path,
     ];
     lines.add(row.map(csvCell).join(','));
   }
@@ -1583,6 +1616,8 @@ class _HomeState extends State<Home> {
   AppTrade? focusTrade;                           // trade selected in the Paper tab, drawn on the Markets chart
   String ofSide = 'All', ofTf = 'All', ofPnl = 'All', ofSort = 'Newest';   // filters of the live open-trades table
   final TextEditingController ofCoinCtl = TextEditingController();
+  bool paperMr = true;                            // mean-reversion BUY strategy on/off
+  DateTime lastPathSave = DateTime.now();
   double paperAmount = 0;                         // USD per paper trade typed in Settings; 0 = risk 1% of the account
   final TextEditingController paperAmountCtl = TextEditingController();
   int paperSignals = 0;                           // signals that passed the score/ADX pre-filter this session
@@ -1919,6 +1954,7 @@ class _HomeState extends State<Home> {
       paperMinScore = p.getDouble('app_paper_min') ?? 0.50;
       paperMaxOpen = p.getInt('app_paper_max') ?? 1000000;
       paperAmount = p.getDouble('app_paper_amount') ?? 0;
+      paperMr = p.getBool('app_paper_mr') ?? true;
       paperAmountCtl.text = paperAmount > 0 ? paperAmount.toStringAsFixed(paperAmount == paperAmount.roundToDouble() ? 0 : 2) : '';
       paperCoins = p.getInt('app_paper_coins') ?? 20;
       final tl = p.getStringList('app_paper_tfs');
@@ -1967,6 +2003,7 @@ class _HomeState extends State<Home> {
       await p.setDouble('app_paper_min', paperMinScore);
       await p.setInt('app_paper_max', paperMaxOpen);
       await p.setDouble('app_paper_amount', paperAmount);
+      await p.setBool('app_paper_mr', paperMr);
       await p.setInt('app_paper_q', paperMinQ);
       await p.setInt('app_paper_adx', paperMinAdx);
       await p.setInt('app_paper_coins', paperCoins);
@@ -1995,7 +2032,7 @@ class _HomeState extends State<Home> {
       rvol: q?['rvol'] as double?, ext: q?['ext'] as double?, quality: (q?['q'] as int?) ?? 0,
       htfAgree: (q?['htf'] as int?) ?? 0, btc: (q?['btc'] as int?) ?? 0,
       regime: '${q?['regime'] ?? ''}',
-      inds: [for (final x in [...a.ma, ...a.osc]) if (!isInfoOnly(x) && x.sig == a.side) x.name].join('|'),
+      inds: (q?['inds'] as String?) ?? [for (final x in [...a.ma, ...a.osc]) if (!isInfoOnly(x) && x.sig == a.side) x.name].join('|'),
     );
     trades.add(t);
     return t;
@@ -2158,9 +2195,10 @@ class _HomeState extends State<Home> {
             if (cs[cs.length - 2].time.millisecondsSinceEpoch + barMs(j[1]) != t0) return null;   // exchange has not published it yet, retry next minute
             paperLogged['${j[0]}|${j[1]}'] = t0;
             final ac = analyze(cs.sublist(0, cs.length - 1), 2);
-            if (ac.side == 0 || ac.score.abs() < paperMinScore) return null;
-            if (paperMinAdx > 0 && !ac.adx.isNaN && ac.adx < paperMinAdx) return null;   // no trend, no edge in the Lab
-            return {'coin': j[0], 'tf': j[1], 'cs': cs, 'ac': ac};
+            final trendOk = !(ac.side == 0 || ac.score.abs() < paperMinScore) && !(paperMinAdx > 0 && !ac.adx.isNaN && ac.adx < paperMinAdx);   // no trend, no edge in the Lab
+            final mr = paperMr ? mrSignal(ac) : null;
+            if (!trendOk && mr == null) return null;
+            return {'coin': j[0], 'tf': j[1], 'cs': cs, 'ac': ac, 'trend': trendOk, 'mr': mr};
           } catch (_) {
             return null;
           }
@@ -2176,12 +2214,26 @@ class _HomeState extends State<Home> {
         final coin = m['coin'] as String, tf = m['tf'] as String;
         final ac = m['ac'] as Analysis;
         final cs = m['cs'] as List<Candle>;
+        final isTrend = m['trend'] == true;
+        final mrSig = m['mr'] as MrSignal?;
         if (trades.any((t) => t.isOpen && t.coin == coin)) continue; // avoid duplicate exposure across timeframes
         if (eventSoon(coin) != null) continue;                         // same news blackout as the Final call
         final holdH = paperHoldHours[tf] ?? 48;
         final cooldown = trades.any((t) => !t.isOpen && t.coin == coin && t.tf == tf && t.closed != null &&
             DateTime.now().difference(t.closed!).inMinutes < holdH * 15);   // wait a quarter of the hold time after a close
         if (cooldown) continue;
+        if (!isTrend) {
+          // mean-reversion BUY: same news blackout, cooldown, one-trade-per-coin and 1:1 plan as the trend trades, its own label
+          if (mrSig == null) continue;
+          final mrAnalysis = Analysis(ac.ma, ac.osc, ac.info, ac.buys, ac.sells, ac.neutrals, cs.last.open, ac.atr, ac.adx, mrSig.side * 0.5, ac.sup, ac.res);
+          final nm = openPaperTrade(coin, tf, mrAnalysis, 'MR', {'inds': mrSig.inds, 'regime': 'Mean reversion'});
+          if (nm != null) {
+            opened++;
+            notifyPaper(nm.id, 'Mean-reversion trade opened: ${nm.coin} ${nm.side > 0 ? 'BUY' : 'SELL'} ($tf)',
+                'Entry ${fmtPrice(nm.entry)}  SL ${fmtPrice(nm.sl)}  TP ${fmtPrice(nm.tp)}');
+          }
+          continue;
+        }
         // Use only the fully closed candle for the signal. Enter at the next candle's open
         // so the signal does not depend on a still-forming/repainting candle.
         final entryAnalysis = Analysis(
@@ -2253,6 +2305,22 @@ class _HomeState extends State<Home> {
         if (!force && q != null && q.ageSec < 10) continue;
         final px = await fetchPrice(c);
         if (px != null) liveQuotes[c] = LiveQuote(px, px, px, DateTime.now(), 'Yahoo Finance (may be delayed)');
+      }
+      // price path: unrealized R about every 5 minutes, so exits (break-even, trailing stop) can be tested on real paths later
+      final nowP = DateTime.now();
+      var pathChanged = false;
+      for (final t in open) {
+        final qq = liveQuotes[t.coin];
+        final pp = livePnl(t, qq);
+        if (pp == null || qq == null || qq.ageSec > 30) continue;
+        if (t.pathAt != null && nowP.difference(t.pathAt!).inMinutes < 5) continue;
+        if (t.path.length < 4000) t.path = (t.path.isEmpty ? '' : '${t.path};') + pp.r.toStringAsFixed(2);
+        t.pathAt = nowP;
+        pathChanged = true;
+      }
+      if (pathChanged && nowP.difference(lastPathSave).inMinutes >= 10) {
+        lastPathSave = nowP;
+        await savePaper();
       }
       liveAt = DateTime.now();
     } catch (_) {
@@ -3833,6 +3901,14 @@ class _HomeState extends State<Home> {
               const Expanded(child: Text('Auto paper trading', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
               Switch(value: autoPaper, onChanged: setAutoPaper),
             ]),
+            SwitchListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Mean-reversion BUY (experimental)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+              subtitle: const Text('Buys oversold dips when the Z-score and another stretch indicator agree. Tracked separately as "App MR" so it never mixes with the trend results. SELL is off because the Lab found it losing.', style: TextStyle(fontSize: 11)),
+              value: paperMr,
+              onChanged: (v) { setState(() => paperMr = v); savePaper(); },
+            ),
             Text(autoPaper
                 ? 'ON. When a candle closes on any chosen timeframe, the app checks the top $paperCoins coins and opens virtual trades from the signals that pass your filters. Keep the app open.'
                 : 'OFF. Turn on to let the app open virtual trades on the top $paperCoins coins across the timeframes you choose, and track whether they hit target or stop.',
@@ -3930,6 +4006,7 @@ class _HomeState extends State<Home> {
         ),
       if (open.isNotEmpty) liveBoard(open),
       if (st.n > 0) ...[
+        group('By strategy', by((t) => t.source == 'auto' ? 'Trend (auto)' : t.source == 'MR' ? 'Mean reversion (MR)' : 'Manual')),
         group('By timeframe', by((t) => t.tf)),
         group('By trading style', by((t) => styleOf(t.tf))),
         group('By direction', by((t) => t.side == 1 ? 'BUY' : 'SELL')),
