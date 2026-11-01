@@ -1112,9 +1112,110 @@ const paperHoldHours = {'1m': 2, '5m': 6, '15m': 12, '30m': 24, '1h': 48, '4h': 
 
 double? cleanNum(double? v) => v == null || v.isNaN || v.isInfinite ? null : v;
 
+// ---------- live market quotes, market regime and the signal gate ----------
+/// Best bid/ask snapshot for one coin. A BUY is closed at the bid and a SELL at the ask, so unrealized P&L uses the executable side.
+class LiveQuote {
+  final double bid, ask, last;
+  final DateTime at;
+  final String source;
+  LiveQuote(this.bid, this.ask, this.last, this.at, this.source);
+  double exitPrice(int side) => side == 1 ? bid : ask;
+  int get ageSec => DateTime.now().difference(at).inSeconds;
+  String get status => ageSec <= 12 ? 'LIVE' : ageSec <= 60 ? 'STALE' : 'OFFLINE';
+}
+
+/// Binance best bid/ask for every symbol in one request (futures, or spot as the fallback). symbol -> [bid, ask]
+Future<Map<String, List<double>>> fetchBookTickers({bool spot = false}) async {
+  final out = <String, List<double>>{};
+  try {
+    final uri = spot ? Uri.https('api.binance.com', '/api/v3/ticker/bookTicker') : Uri.https('fapi.binance.com', '/fapi/v1/ticker/bookTicker');
+    final r = await http.get(uri).timeout(const Duration(seconds: 10));
+    if (r.statusCode != 200) return out;
+    for (final e in jsonDecode(r.body) as List) {
+      final b = double.tryParse('${e['bidPrice']}'), a = double.tryParse('${e['askPrice']}');
+      if (b != null && a != null && b > 0 && a > 0) out['${e['symbol']}'] = [b, a];
+    }
+  } catch (_) {}
+  return out;
+}
+
+String exchangeLabel(String coin) => yahooPairs.containsKey(coin) ? 'Yahoo Finance' : (futSymbols.containsKey(coin) ? 'Binance Futures' : 'Binance Spot');
+
+String sinceText(DateTime t) {
+  final d = DateTime.now().difference(t);
+  if (d.inMinutes < 1) return '${d.inSeconds}s';
+  if (d.inHours < 1) return '${d.inMinutes}m';
+  if (d.inHours < 48) return '${d.inHours}h ${d.inMinutes % 60}m';
+  return '${d.inDays}d ${d.inHours % 24}h';
+}
+
+/// Unrealized result of an open trade at the executable exit price, with the same fee model as settled trades.
+class LivePnl {
+  final double px, r, usd, pct, tpProgress, slDistPct, slDistR;
+  LivePnl(this.px, this.r, this.usd, this.pct, this.tpProgress, this.slDistPct, this.slDistR);
+}
+
+LivePnl? livePnl(AppTrade t, LiveQuote? q) {
+  if (q == null || t.riskPx <= 0 || t.entry <= 0) return null;
+  final px = q.exitPrice(t.side);
+  final r = (px - t.entry) * t.side / t.riskPx - paperCostR;
+  final tpDist = (t.tp - t.entry).abs();
+  return LivePnl(px, r, r * t.riskCash, (px - t.entry) * t.side / t.entry * 100,
+      tpDist == 0 ? 0 : (px - t.entry) * t.side / tpDist * 100,
+      px == 0 ? 0 : (px - t.sl) * t.side / px * 100, (px - t.sl) * t.side / t.riskPx);
+}
+
+class GateReject {
+  final DateTime at;
+  final String coin, tf, reason;
+  final int side;
+  GateReject(this.at, this.coin, this.tf, this.side, this.reason);
+}
+
+class Regime {
+  final String label, note;
+  final bool tradable;       // for the direction that was asked about
+  const Regime(this.label, this.tradable, this.note);
+}
+
+double medianOf(List<double> v) {
+  if (v.isEmpty) return double.nan;
+  final s = [...v]..sort();
+  final m = s.length ~/ 2;
+  return s.length.isOdd ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+
+/// Market regime from ADX (trend strength), ATR versus its own 100-candle median (volatility) and EMA20/EMA50 position.
+/// These thresholds are sensible defaults, not values validated by a backtest.
+Regime detectRegime({required int side, required double adx, required double atrRatio, required double emaFast,
+    required double emaSlow, required double last, required double rsi}) {
+  if (!atrRatio.isNaN) {
+    if (atrRatio >= 2.0) return Regime('High volatility', false, 'ATR is ${atrRatio.toStringAsFixed(1)}x its normal level, stops get hit by noise');
+    if (atrRatio <= 0.5) return Regime('Low volatility', false, 'ATR is only ${atrRatio.toStringAsFixed(1)}x its normal level, moves are too small to beat costs');
+  }
+  final up = emaFast > emaSlow, down = emaFast < emaSlow;
+  final trending = !adx.isNaN && adx >= 25;
+  if (trending && up && last > emaFast) return Regime('Strong uptrend', side == 1, 'a SELL goes against a strong uptrend');
+  if (trending && down && last < emaFast) return Regime('Strong downtrend', side == -1, 'a BUY goes against a strong downtrend');
+  if (up && last < emaFast && !rsi.isNaN && rsi < 45) return Regime('Possible reversal down', side == -1, 'the trend is turning down, a BUY is premature');
+  if (down && last > emaFast && !rsi.isNaN && rsi > 55) return Regime('Possible reversal up', side == 1, 'the trend is turning up, a SELL is premature');
+  if (!adx.isNaN && adx < 20) return const Regime('Sideways / ranging', true, '');
+  return const Regime('Mixed trend', true, '');
+}
+
+// Signal gate limits, separate for BUY (1) and SELL (-1). Defaults are equal because the data so far is too small to justify
+// different values: tune them from your own CSV results.
+const gateExtMax = {1: 1.2, -1: 1.2};            // max ATR distance from EMA20 in the trade direction (anti-chasing)
+const gateRsiLimit = {1: 70.0, -1: 30.0};        // BUY blocked above, SELL blocked below
+const gateMinScoreAdd = {1: 0.0, -1: 0.0};       // extra score required on top of the minimum signal strength
+const gateSrMinAtr = 0.5;                        // opposing support/resistance must be at least this many ATR away
+const gateLateMoveAtr = 3.0;                     // max move in the trade direction over the last 5 candles
+const gateCandleBodyAtr = 0.7;                   // reject if the last closed candle is a strong move against the signal
+
 class AppTrade {
   final int id, side, buys, sells, neutrals, mood;
   final String coin, tf, source, verdict;
+  final String regime, inds;   // market regime at entry and the indicators that agreed ('|' separated)
   final double entry, sl, tp, score, riskCash;
   final double? adx, atrPct, rvol, ext;
   final int quality, htfAgree, btc;
@@ -1128,7 +1229,7 @@ class AppTrade {
       required this.side, required this.buys, required this.sells, required this.neutrals, required this.mood,
       required this.entry, required this.sl, required this.tp, required this.score, required this.riskCash,
       required this.adx, required this.atrPct, required this.opened,
-      this.rvol, this.ext, this.quality = 0, this.htfAgree = 0, this.btc = 0});
+      this.rvol, this.ext, this.quality = 0, this.htfAgree = 0, this.btc = 0, this.regime = '', this.inds = ''});
 
   bool get isOpen => status == 'open';
   double get riskPx => (entry - sl).abs();
@@ -1142,6 +1243,7 @@ class AppTrade {
         'status': status, 'reason': reason, 'mfe': mfe, 'mae': mae, 'exit': exitPx, 'r': r, 'amb': ambiguous,
         'closed': closed?.toIso8601String(),
         'rvol': cleanNum(rvol), 'ext': cleanNum(ext), 'q': quality, 'htf': htfAgree, 'btc': btc,
+        'regime': regime, 'inds': inds,
       };
 
   factory AppTrade.fromJson(Map<String, dynamic> j) {
@@ -1154,6 +1256,7 @@ class AppTrade {
       atrPct: (j['atrPct'] as num?)?.toDouble(), opened: DateTime.tryParse('${j['opened']}') ?? DateTime.now(),
       rvol: (j['rvol'] as num?)?.toDouble(), ext: (j['ext'] as num?)?.toDouble(), quality: (j['q'] as num?)?.toInt() ?? 0,
       htfAgree: (j['htf'] as num?)?.toInt() ?? 0, btc: (j['btc'] as num?)?.toInt() ?? 0,
+      regime: '${j['regime'] ?? ''}', inds: '${j['inds'] ?? ''}',
     );
     t.status = '${j['status'] ?? 'open'}';
     t.reason = '${j['reason'] ?? ''}';
@@ -1235,7 +1338,7 @@ String tradesToCsv(List<AppTrade> trades) {
   const cols = ['id', 'status', 'opened_utc', 'closed_utc', 'hours_held', 'symbol', 'strategy', 'tf', 'side', 'verdict', 'score',
     'entry', 'sl', 'tp', 'risk_pct', 'planned_rr', 'exit_price', 'exit_reason', 'same_candle_sl_tp', 'r_multiple', 'pnl_usd',
     'mfe_r', 'mae_r', 'buys', 'neutrals', 'sells', 'adx', 'atr_pct', 'news_mood', 'hour_utc', 'weekday',
-    'quality', 'htf_agree', 'rvol', 'ext_atr', 'btc_regime'];
+    'quality', 'htf_agree', 'rvol', 'ext_atr', 'btc_regime', 'market_regime', 'agreeing_indicators'];
   String r(double? v, int n) => v == null ? '' : v.toStringAsFixed(n);
   final out = StringBuffer(cols.join(',')).toString();
   final lines = <String>[out];
@@ -1249,7 +1352,7 @@ String tradesToCsv(List<AppTrade> trades) {
       t.entry, t.sl, t.tp, r(t.entry == 0 ? null : t.riskPx / t.entry * 100, 3), r(t.plannedRr, 2),
       done ? t.exitPx : '', done ? t.reason : '', done ? t.ambiguous : '', done ? r(t.r, 3) : '', done ? r(t.pnl, 2) : '',
       r(t.mfe, 2), r(t.mae, 2), t.buys, t.neutrals, t.sells, r(t.adx, 1), r(t.atrPct, 3), t.mood, u.hour, u.weekday,
-      t.quality, t.htfAgree, r(t.rvol, 2), r(t.ext, 2), t.btc,
+      t.quality, t.htfAgree, r(t.rvol, 2), r(t.ext, 2), t.btc, t.regime, t.inds,
     ];
     lines.add(row.map(csvCell).join(','));
   }
@@ -1467,6 +1570,13 @@ class _HomeState extends State<Home> {
   List<String> paperCoinList = [];
   DateTime paperCoinsAt = DateTime(2000);
   String paperStatus = '';
+  final Map<String, LiveQuote> liveQuotes = {};   // coin -> latest bid/ask
+  DateTime? liveAt;
+  bool liveBusy = false;
+  Timer? liveTimer;
+  final List<GateReject> gateRejects = [];        // most recent signals the gate turned into NO TRADE
+  final Map<String, String> gateLast = {};        // coin|tf -> 'hh:mm|OK' or 'hh:mm|reason'
+  int paperSignals = 0;                           // signals that passed the score/ADX pre-filter this session
   final Map<String, Analysis?> _htfCache = {};
   DateTime _htfCacheAt = DateTime(2000);
   Timer? paperTimer;
@@ -1503,6 +1613,7 @@ class _HomeState extends State<Home> {
       paperScanCycle();
     });
     uiTimer = Timer.periodic(const Duration(seconds: 1), (_) { if (mounted) setState(() {}); });   // refresh every tab each second
+    liveTimer = Timer.periodic(const Duration(seconds: 3), (_) => refreshLive());                    // current rates for open paper trades
     loadLab();
     labTimer = Timer.periodic(const Duration(seconds: 60), (_) => labCycle());
   }
@@ -1518,6 +1629,7 @@ class _HomeState extends State<Home> {
     paperTimer?.cancel();
     labTimer?.cancel();
     uiTimer?.cancel();
+    liveTimer?.cancel();
     super.dispose();
   }
 
@@ -1864,6 +1976,8 @@ class _HomeState extends State<Home> {
       atrPct: a.last == 0 ? null : cleanNum(a.atr / a.last * 100), opened: DateTime.now(),
       rvol: q?['rvol'] as double?, ext: q?['ext'] as double?, quality: (q?['q'] as int?) ?? 0,
       htfAgree: (q?['htf'] as int?) ?? 0, btc: (q?['btc'] as int?) ?? 0,
+      regime: '${q?['regime'] ?? ''}',
+      inds: [for (final x in [...a.ma, ...a.osc]) if (!isInfoOnly(x) && x.sig == a.side) x.name].join('|'),
     );
     trades.add(t);
     return t;
@@ -1896,9 +2010,11 @@ class _HomeState extends State<Home> {
     final c = closed.map((x) => x.close).toList();
     final ema20 = emaSeries(c, 20).last;
     final ext = ac.atr > 0 ? (c.last - ema20) * side / ac.atr : 0.0;        // + = stretched in trade direction
-    if (ext > 1.5) veto = 'price stretched ${ext.toStringAsFixed(1)} ATR from EMA20 (chasing; max 1.5 ATR)';
+    final extMax = gateExtMax[side] ?? 1.2;
+    if (ext > extMax) veto = 'price stretched ${ext.toStringAsFixed(1)} ATR from EMA20 (chasing; max ${extMax.toStringAsFixed(1)} ATR)';
     final rsi = rsiLast(c, 14);
-    if (veto == null && !rsi.isNaN && ((side == 1 && rsi > 70) || (side == -1 && rsi < 30))) veto = 'RSI exhausted (${rsi.toStringAsFixed(0)})';
+    final rsiLim = gateRsiLimit[side] ?? (side == 1 ? 70.0 : 30.0);
+    if (veto == null && !rsi.isNaN && ((side == 1 && rsi > rsiLim) || (side == -1 && rsi < rsiLim))) veto = 'RSI exhausted (${rsi.toStringAsFixed(0)})';
     // relative volume of the last closed candle vs the previous 20
     double? rvol;
     final vols = closed.map((x) => x.volume).toList();
@@ -1908,6 +2024,35 @@ class _HomeState extends State<Home> {
     }
     if (veto == null && rvol != null && rvol < 0.7) veto = 'dead volume (${rvol.toStringAsFixed(2)}x average)';
     if (veto == null && rvol != null && rvol > 3.0) veto = 'volume spike may be exhaustion (${rvol.toStringAsFixed(2)}x average)';
+    // ---- market regime, entry quality, support/resistance and candle momentum
+    var regime = const Regime('Unknown', true, '');
+    if (closed.length >= 120) {
+      final hh = closed.map((x) => x.high).toList(), ll = closed.map((x) => x.low).toList();
+      final atrS = wilder(trSeries(hh, ll, c), 14);
+      final med = medianOf(atrS.sublist(atrS.length - 100));
+      final ratio = med > 0 ? atrS.last / med : double.nan;
+      regime = detectRegime(side: side, adx: ac.adx, atrRatio: ratio, emaFast: ema20, emaSlow: emaSeries(c, 50).last, last: c.last, rsi: rsi);
+      if (veto == null && !regime.tradable) veto = '${regime.label}: ${regime.note}';
+    }
+    if (veto == null && c.length > 6 && ac.atr > 0) {
+      final run = (c.last - c[c.length - 6]) * side / ac.atr;
+      if (run > gateLateMoveAtr) veto = 'late entry: price already moved ${run.toStringAsFixed(1)} ATR in 5 candles (max ${gateLateMoveAtr.toStringAsFixed(1)})';
+    }
+    if (veto == null && ac.atr > 0 && closed.isNotEmpty) {
+      final body = (closed.last.close - closed.last.open) * side / ac.atr;     // negative = the last candle went against the signal
+      if (body < -gateCandleBodyAtr) veto = 'last candle moved ${(-body).toStringAsFixed(1)} ATR against it';
+    }
+    if (veto == null && ac.atr > 0) {
+      if (side == 1 && ac.res.isNotEmpty && ac.res.first > ac.last && (ac.res.first - ac.last) < gateSrMinAtr * ac.atr) {
+        veto = 'resistance ${fmtPrice(ac.res.first)} is only ${((ac.res.first - ac.last) / ac.atr).toStringAsFixed(1)} ATR above';
+      }
+      if (side == -1 && ac.sup.isNotEmpty && ac.sup.first < ac.last && (ac.last - ac.sup.first) < gateSrMinAtr * ac.atr) {
+        veto = 'support ${fmtPrice(ac.sup.first)} is only ${((ac.last - ac.sup.first) / ac.atr).toStringAsFixed(1)} ATR below';
+      }
+    }
+    if (veto == null && ac.score.abs() < paperMinScore + (gateMinScoreAdd[side] ?? 0.0)) {
+      veto = 'score ${ac.score.abs().toStringAsFixed(2)} is below the ${side == 1 ? 'BUY' : 'SELL'} minimum';
+    }
     // higher timeframes
     final idx = mtfList.indexOf(tf);
     int htfSide(Analysis? a) => a?.side ?? 0;
@@ -1955,7 +2100,8 @@ class _HomeState extends State<Home> {
     if (!ac.adx.isNaN && ac.adx >= 20) q++;
     if (crowdKnown && crowdOk) q++;
     final why = veto ?? (q < paperMinQ ? 'quality $q of 5, needs $paperMinQ' : null);
-    return {'ok': why == null, 'why': why, 'q': q, 'htf': htf, 'rvol': rvol, 'ext': ext, 'btc': btc};
+    gateLast['$coin|$tf'] = '${hhmm(DateTime.now())}|${why ?? 'OK'}';
+    return {'ok': why == null, 'why': why, 'q': q, 'htf': htf, 'rvol': rvol, 'ext': ext, 'btc': btc, 'regime': regime.label};
   }
 
   /// Runs every minute. For each chosen timeframe whose candle just closed, checks the top coins once and opens paper trades.
@@ -2006,6 +2152,7 @@ class _HomeState extends State<Home> {
       }
       cands.sort((a, b) => (b['ac'] as Analysis).score.abs().compareTo((a['ac'] as Analysis).score.abs()));
       var opened = 0, rejected = 0, qchecked = 0;
+      paperSignals += cands.length;
       for (final m in cands) {
         if (trades.where((t) => t.isOpen && t.source == 'auto').length >= paperMaxOpen) break;   // manual trades do not use up the auto limit
         final coin = m['coin'] as String, tf = m['tf'] as String;
@@ -2031,6 +2178,8 @@ class _HomeState extends State<Home> {
           if (q['ok'] != true) {
             rejected++;
             paperRejected++;
+            gateRejects.insert(0, GateReject(DateTime.now(), coin, tf, ac.side, '${q['why']}'));
+            if (gateRejects.length > 60) gateRejects.removeLast();
             continue;
           }
         }
@@ -2047,6 +2196,50 @@ class _HomeState extends State<Home> {
       paperStatus = 'Auto paper trading could not run: $e';
     } finally {
       paperScanBusy = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// Current market rate for every open paper trade. Binance coins: one best bid/ask request for all symbols (futures, then spot).
+  /// Forex, gold and oil have no free bid/ask, so they use Yahoo Finance's latest price (can be delayed) and are labelled so.
+  /// Polling every 3 seconds, not a WebSocket stream; a quote older than 12 s shows STALE and older than 60 s OFFLINE.
+  Future<void> refreshLive({bool force = false}) async {
+    if (liveBusy) return;
+    final open = trades.where((t) => t.isOpen).toList();
+    if (open.isEmpty) return;
+    liveBusy = true;
+    try {
+      final crypto = <String>{}, other = <String>{};
+      for (final t in open) {
+        (yahooPairs.containsKey(t.coin) ? other : crypto).add(t.coin);
+      }
+      if (crypto.isNotEmpty) {
+        if (futSymbols.isEmpty) await loadFutures();
+        final fut = await fetchBookTickers();
+        Map<String, List<double>> spot = {};
+        final now = DateTime.now();
+        for (final c in crypto) {
+          final pair = futSymbols[c] ?? '${c}USDT';
+          var b = fut[pair];
+          var src = 'Binance Futures';
+          if (b == null) {
+            if (spot.isEmpty) spot = await fetchBookTickers(spot: true);
+            b = spot[pair];
+            src = 'Binance Spot';
+          }
+          if (b != null) liveQuotes[c] = LiveQuote(b[0], b[1], (b[0] + b[1]) / 2, now, src);
+        }
+      }
+      for (final c in other) {
+        final q = liveQuotes[c];
+        if (!force && q != null && q.ageSec < 10) continue;
+        final px = await fetchPrice(c);
+        if (px != null) liveQuotes[c] = LiveQuote(px, px, px, DateTime.now(), 'Yahoo Finance (may be delayed)');
+      }
+      liveAt = DateTime.now();
+    } catch (_) {
+    } finally {
+      liveBusy = false;
       if (mounted) setState(() {});
     }
   }
@@ -2828,6 +3021,7 @@ class _HomeState extends State<Home> {
     final dirName = a.side == 1 ? 'BUY' : 'SELL';
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       _finalCall(a),
+      gateNote(),
       if (plan2 != null)
         Wrap(spacing: 8, children: [
           OutlinedButton.icon(onPressed: () => addAlert(marketSymbol, tp1, '$dirName plan: TP1 reached'), icon: const Icon(Icons.add_alert, size: 16), label: const Text('Alert TP1')),
@@ -3233,6 +3427,206 @@ class _HomeState extends State<Home> {
     ]);
   }
 
+  Widget statBox(String title, String value, [Color? c]) => SizedBox(
+        width: 112,
+        child: Card(
+          margin: const EdgeInsets.all(3),
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: const TextStyle(fontSize: 10)),
+              const SizedBox(height: 2),
+              Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: c)),
+            ]),
+          ),
+        ),
+      );
+
+  /// Live table of open paper trades with the current market rate, P&L and a summary strip.
+  Widget liveBoard(List<AppTrade> open) {
+    Color rc(double v) => v >= 0 ? Colors.green : Colors.red;
+    String sgn(double v, [int d = 2]) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(d)}';
+    var unreal = 0.0, tpSum = 0.0, slSum = 0.0, known = 0, winNow = 0, loseNow = 0;
+    for (final t in open) {
+      final p = livePnl(t, liveQuotes[t.coin]);
+      if (p == null) continue;
+      known++;
+      unreal += p.usd;
+      tpSum += p.tpProgress;
+      slSum += p.slDistPct;
+      if (p.usd > 0) winNow++;
+      if (p.usd < 0) loseNow++;
+    }
+    final realized = trades.where((t) => !t.isOpen).fold<double>(0, (a, t) => a + t.pnl);
+    final age = liveAt == null ? null : DateTime.now().difference(liveAt!).inSeconds;
+    final feed = age == null ? 'WAITING' : age <= 12 ? 'LIVE' : age <= 60 ? 'STALE' : 'OFFLINE';
+    final feedCol = feed == 'LIVE' ? Colors.green : feed == 'WAITING' ? Colors.grey : feed == 'STALE' ? Colors.orange : Colors.red;
+    DataRow row(AppTrade t) {
+      final q = liveQuotes[t.coin];
+      final p = livePnl(t, q);
+      final st = q == null ? 'OFFLINE' : q.status;
+      final stc = st == 'LIVE' ? Colors.green : st == 'STALE' ? Colors.orange : Colors.red;
+      final col = p == null ? null : rc(p.usd);
+      return DataRow(cells: [
+        DataCell(Text('${t.coin} ${t.tf}', style: const TextStyle(fontWeight: FontWeight.w600))),
+        DataCell(Text(q?.source ?? exchangeLabel(t.coin), style: const TextStyle(fontSize: 11))),
+        DataCell(Text(t.side == 1 ? 'BUY' : 'SELL', style: TextStyle(color: t.side == 1 ? Colors.green : Colors.red, fontWeight: FontWeight.w700))),
+        DataCell(Text(fmtPrice(t.entry))),
+        DataCell(Text(p == null ? '-' : fmtPrice(p.px), style: TextStyle(fontWeight: FontWeight.w700, color: col))),
+        DataCell(Text(fmtPrice(t.tp))),
+        DataCell(Text(fmtPrice(t.sl))),
+        DataCell(Text(p == null ? '-' : '${sgn(p.usd)} (${sgn(p.r)}R)', style: TextStyle(fontWeight: FontWeight.w600, color: col))),
+        DataCell(Text(p == null ? '-' : '${sgn(p.pct)}%', style: TextStyle(color: col))),
+        DataCell(Text(p == null ? '-' : '${p.tpProgress.toStringAsFixed(0)}%')),
+        DataCell(Text(p == null ? '-' : '${p.slDistPct.toStringAsFixed(2)}% (${p.slDistR.toStringAsFixed(1)}R)')),
+        DataCell(Text('OPEN $st', style: TextStyle(fontWeight: FontWeight.w600, color: stc))),
+        DataCell(Text(sinceText(t.opened))),
+      ]);
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(4, 12, 4, 2),
+        child: Row(children: [
+          const Expanded(child: Text('Live open trades', style: TextStyle(fontWeight: FontWeight.w600))),
+          Text(feed, style: TextStyle(fontWeight: FontWeight.w700, color: feedCol, fontSize: 12)),
+          const SizedBox(width: 6),
+          Text(liveAt == null ? 'no price yet' : 'updated ${hhmm(liveAt!)}:${liveAt!.second.toString().padLeft(2, '0')}', style: const TextStyle(fontSize: 11)),
+          IconButton(onPressed: () => refreshLive(force: true), icon: const Icon(Icons.refresh, size: 20), tooltip: 'Refresh prices now'),
+        ]),
+      ),
+      Wrap(children: [
+        statBox('Open trades', '${open.length}'),
+        statBox('Unrealized P&L', '${sgn(unreal)} \$', known == 0 ? null : rc(unreal)),
+        statBox('Realized P&L', '${sgn(realized)} \$', rc(realized)),
+        statBox('Winning now', '$winNow', Colors.green),
+        statBox('Losing now', '$loseNow', Colors.red),
+        statBox('Avg TP progress', known == 0 ? '-' : '${(tpSum / known).toStringAsFixed(0)}%'),
+        statBox('Avg SL distance', known == 0 ? '-' : '${(slSum / known).toStringAsFixed(2)}%'),
+      ]),
+      Card(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: DataTable(
+            columnSpacing: 14,
+            headingRowHeight: 34,
+            dataRowMinHeight: 36,
+            dataRowMaxHeight: 40,
+            columns: const [
+              DataColumn(label: Text('Symbol')), DataColumn(label: Text('Exchange')), DataColumn(label: Text('Side')),
+              DataColumn(label: Text('Entry')), DataColumn(label: Text('Current rate')), DataColumn(label: Text('TP')),
+              DataColumn(label: Text('SL')), DataColumn(label: Text('Unrealized P&L')), DataColumn(label: Text('P&L %')),
+              DataColumn(label: Text('TP progress')), DataColumn(label: Text('SL distance')), DataColumn(label: Text('Status')),
+              DataColumn(label: Text('Open for')),
+            ],
+            rows: [for (final t in open.take(150)) row(t)],
+          ),
+        ),
+      ),
+      const Padding(
+        padding: EdgeInsets.fromLTRB(4, 2, 4, 0),
+        child: Text('Rates are polled every 3 seconds (not a WebSocket stream). Binance coins use the best bid/ask: a BUY is valued at the bid and a SELL at the ask, minus the 0.05R fee. '
+            'Forex, gold and oil use Yahoo Finance and can lag. LIVE under 12 s old, STALE under 60 s, otherwise OFFLINE. Open trades are not counted as wins or losses until they close.',
+            style: TextStyle(fontSize: 10)),
+      ),
+    ]);
+  }
+
+  /// Trading results (profit) shown separately from directional accuracy (did price at least move our way).
+  Widget perfDashboard() {
+    final done = trades.where((t) => !t.isOpen).toList()
+      ..sort((a, b) => (a.closed ?? a.opened).compareTo(b.closed ?? b.opened));
+    if (done.isEmpty) return const SizedBox.shrink();
+    final wins = done.where((t) => t.r > 0).toList(), losses = done.where((t) => t.r <= 0).toList();
+    final net = done.fold<double>(0, (a, t) => a + t.pnl);
+    final gw = wins.fold<double>(0, (a, t) => a + t.pnl), gl = -losses.fold<double>(0, (a, t) => a + t.pnl);
+    final pf = gl == 0 ? (gw > 0 ? 99.0 : 0.0) : gw / gl;
+    var eq = paperStart, peak = paperStart, maxDd = 0.0;
+    for (final t in done) {
+      eq += t.pnl;
+      if (eq > peak) peak = eq;
+      if (peak > 0) maxDd = math.max(maxDd, (peak - eq) / peak * 100);
+    }
+    final tpN = done.where((t) => t.reason == 'TP').length, slN = done.where((t) => t.reason == 'SL').length;
+    final dirOk = done.where((t) => t.mfe >= 0.5).length;
+    final expR = done.fold<double>(0, (a, t) => a + t.r) / done.length;
+    final avgW = wins.isEmpty ? 0.0 : gw / wins.length, avgL = losses.isEmpty ? 0.0 : -gl / losses.length;
+    final open = trades.where((t) => t.isOpen).length, auto = trades.where((t) => t.source == 'auto').length;
+    Color rc(double v) => v >= 0 ? Colors.green : Colors.red;
+    String sgn(double v, [int d = 2]) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(d)}';
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('Performance dashboard', style: TextStyle(fontWeight: FontWeight.w700)),
+          Wrap(children: [
+            statBox('Signals (session)', '$paperSignals'),
+            statBox('Auto trades opened', '$auto'),
+            statBox('Open now', '$open'),
+            statBox('Closed', '${done.length}'),
+            statBox('Wins', '${wins.length}', Colors.green),
+            statBox('Losses', '${losses.length}', Colors.red),
+            statBox('Win rate', '${(100 * wins.length / done.length).toStringAsFixed(1)}%'),
+            statBox('TP rate', '${(100 * tpN / done.length).toStringAsFixed(1)}%'),
+            statBox('SL rate', '${(100 * slN / done.length).toStringAsFixed(1)}%'),
+            statBox('Avg win', '${sgn(avgW)} \$', Colors.green),
+            statBox('Avg loss', '${sgn(avgL)} \$', Colors.red),
+            statBox('Net P&L', '${sgn(net)} \$', rc(net)),
+            statBox('Profit factor', pf.toStringAsFixed(2), pf >= 1 ? Colors.green : Colors.red),
+            statBox('Expectancy', '${sgn(expR, 3)} R', rc(expR)),
+            statBox('Max drawdown', '${maxDd.toStringAsFixed(1)}%', maxDd > 10 ? Colors.red : null),
+          ]),
+          const SizedBox(height: 4),
+          Text('Direction right (price moved 0.5R our way): ${(100 * dirOk / done.length).toStringAsFixed(0)}% of trades. Profitable: ${(100 * wins.length / done.length).toStringAsFixed(0)}%. '
+              'Both are shown because a signal can point the right way and still lose money after stops and fees.', style: const TextStyle(fontSize: 11)),
+          if (done.length < 100) Text('Only ${done.length} closed trades: results below 100 trades are mostly noise.', style: const TextStyle(fontSize: 11, color: Colors.orange)),
+        ]),
+      ),
+    );
+  }
+
+  /// Signals the gate turned into NO TRADE, with the reason.
+  Widget gateRejectCard() {
+    if (gateRejects.isEmpty) return const SizedBox.shrink();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('NO TRADE: signals the quality gate rejected', style: TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          for (final g in gateRejects.take(12))
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text('${hhmm(g.at)}  ${g.coin} ${g.tf} ${g.side == 1 ? 'BUY' : 'SELL'}: ${g.reason}', style: const TextStyle(fontSize: 11)),
+            ),
+        ]),
+      ),
+    );
+  }
+
+  /// Markets screen: shows why auto paper trading would not take the current coin/timeframe (only if the scan has checked it).
+  Widget gateNote() {
+    final v = gateLast['$marketSymbol|$marketInterval'];
+    if (v == null) return const SizedBox.shrink();
+    final i = v.indexOf('|');
+    final when = v.substring(0, i), why = v.substring(i + 1);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
+      child: Text(why == 'OK' ? 'Signal gate ($when): passed, auto paper trading would take it.' : 'NO TRADE ($when): $why',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: why == 'OK' ? Colors.green : Colors.orange)),
+    );
+  }
+
+  Map<String, List<AppTrade>> tradesByIndicator() {
+    final m = <String, List<AppTrade>>{};
+    for (final t in trades.where((t) => !t.isOpen)) {
+      for (final n in t.inds.split('|')) {
+        if (n.isEmpty) continue;
+        m.putIfAbsent(n, () => []).add(t);
+      }
+    }
+    return m;
+  }
+
   Widget paperTab() {
     final open = trades.where((t) => t.isOpen).toList().reversed.toList();
     final closed = trades.where((t) => !t.isOpen).toList().reversed.toList();
@@ -3335,6 +3729,8 @@ class _HomeState extends State<Home> {
           ]),
         ),
       ),
+      perfDashboard(),
+      gateRejectCard(),
       if (st.n > 0)
         Card(
           child: Padding(
@@ -3346,22 +3742,16 @@ class _HomeState extends State<Home> {
             ]),
           ),
         ),
-      if (open.isNotEmpty) ...[
-        const Padding(padding: EdgeInsets.fromLTRB(4, 12, 4, 2), child: Text('Open trades', style: TextStyle(fontWeight: FontWeight.w600))),
-        for (final t in open)
-          ListTile(
-            dense: true,
-            title: Text('${t.coin} ${t.side == 1 ? 'BUY' : 'SELL'} (${t.tf})', style: TextStyle(fontWeight: FontWeight.w600, color: t.side == 1 ? Colors.green : Colors.red)),
-            subtitle: Text('Entry ${fmtPrice(t.entry)}  SL ${fmtPrice(t.sl)}  TP ${fmtPrice(t.tp)}\n${t.verdict}, ${ago(t.opened.toIso8601String())}, best ${t.mfe.toStringAsFixed(1)}R / worst ${t.mae.toStringAsFixed(1)}R'),
-            isThreeLine: true,
-          ),
-      ],
+      if (open.isNotEmpty) liveBoard(open),
       if (st.n > 0) ...[
         group('By timeframe', by((t) => t.tf)),
         group('By trading style', by((t) => styleOf(t.tf))),
         group('By direction', by((t) => t.side == 1 ? 'BUY' : 'SELL')),
         group('By signal strength', by((t) => t.score.abs() >= .5 ? 'Strong (0.5+)' : t.score.abs() >= .35 ? 'Medium (0.35-0.5)' : 'Weak (0.2-0.35)')),
         group('By quality score', by((t) => t.quality == 0 ? 'Unfiltered' : 'Quality ${t.quality} of 5')),
+        group('By ADX range', by((t) => t.adx == null ? 'ADX not recorded' : t.adx! < 20 ? 'ADX under 20' : t.adx! < 25 ? 'ADX 20-25' : t.adx! < 30 ? 'ADX 25-30' : t.adx! < 40 ? 'ADX 30-40' : 'ADX 40+')),
+        group('By market regime', by((t) => t.regime.isEmpty ? 'Not recorded' : t.regime)),
+        group('By indicator agreeing at entry', tradesByIndicator()),
         group('By coin', by((t) => t.coin)),
       ],
       if (closed.isNotEmpty) ...[
@@ -3370,7 +3760,8 @@ class _HomeState extends State<Home> {
           ListTile(
             dense: true,
             title: Text('${t.coin} ${t.side == 1 ? 'BUY' : 'SELL'} (${t.tf})  ${t.reason}${t.ambiguous ? ' *' : ''}'),
-            subtitle: Text('${ago(t.closed?.toIso8601String())}, ${t.verdict}'),
+            leading: Icon(t.r > 0 ? Icons.check_circle : Icons.cancel, color: t.r > 0 ? Colors.green : Colors.red, size: 18),
+            subtitle: Text('CLOSED ${ago(t.closed?.toIso8601String())} at ${fmtPrice(t.exitPx)}, ${t.verdict}'),
             trailing: Text('${sgn(t.r)} R', style: TextStyle(fontWeight: FontWeight.w600, color: rc(t.r))),
           ),
         const Text('* stop and target were both touched in the same candle, counted as a stop.', style: TextStyle(fontSize: 11)),
