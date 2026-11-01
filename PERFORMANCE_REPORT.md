@@ -68,14 +68,16 @@ weights are unchanged and the lab keeps collecting.
 * **Stop a trade manually**: a red `Close` button on every open trade (live board and on the Markets chart card). It asks for confirmation, exits at the current bid (BUY) or ask (SELL), charges the same 0.05R fee, saves immediately and counts as a closed trade with reason MANUAL.
 * **Tap a trade to see it on the chart**: tapping a row (open or closed) in the Paper tab switches to Markets, selects that coin and timeframe, and for open trades draws Entry, SL and TP lines on the chart plus a summary card with live P&L.
 * **Filter for open trades**: coin search, Side (All/BUY/SELL), Timeframe (only the ones you have open), P&L now (All/Winning/Losing) and Sort (Newest, Best/Worst P&L, Closest to TP, Closest to SL), with a Clear button and a "showing X of Y" line. The summary cards follow the filter.
+* **Mean-reversion BUY strategy ("App MR", experimental, switch in Paper settings)**: opens a paper BUY when the Z-score(20) is oversold and at least one more stretch indicator (RSI(2), CCI, Bollinger %B, MFI, Stochastic RSI, Williams %R) agrees. Same 1:1 plan, news blackout, cooldown and one-trade-per-coin as the trend trades, but its own label so results never mix (new "By strategy" breakdown). Evidence (lab snapshots Nov 1, 6 hours): after these BUY signals price rose 64.3% of the time, average +0.43 ATR (n=42, 70% in the first half and 59% in the second). The matching SELL signals lost (price rose +0.6 ATR on average), so SELL is off (`mrAllowSell`). Small sample and a mostly rising window: treat as an experiment.
+* **Price path logging**: every open trade records its unrealized R about every 5 minutes (new `r_path` CSV column). With this, break-even and trailing-stop rules can be tested on real paths instead of guessed.
 * Trades now store `market_regime` and `agreeing_indicators` (two new CSV columns at the end; old saved trades still load).
 
 ## 6. What was NOT done, and why
 * **No backtest per timeframe (5m/15m/30m/1h) and no out-of-sample optimisation of RSI/Z-score/weights**: this environment has no market-data access
   and no Flutter/Dart, so I could not download history or run the app. The new regime, late-entry, candle and support/resistance limits are
   sensible defaults, not validated values. Use the new CSV columns to judge them after 100+ trades per rule.
-* **TP/SL, trailing stop, break-even, partial profits not changed**: the CSV only has best/worst move, not the path, so the effect cannot be
-  measured. 26 of 108 losing trades reached +0.5R first, which makes break-even worth testing, but it needs candle-by-candle data.
+* **TP/SL, trailing stop, break-even, partial profits not changed**: the CSV only had best/worst move, not the path, so the effect could not be
+  measured. The new `r_path` column fixes that for future trades. 26 of 108 losing trades reached +0.5R first, which makes break-even worth testing, but it needs candle-by-candle data.
 * **No WebSocket**, no per-timeframe parameter sets, and the Python bot was not changed.
 * Look-ahead: the app already enters at the next candle's open using only the closed candle, which I kept.
 
