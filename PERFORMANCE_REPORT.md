@@ -67,6 +67,7 @@ weights are unchanged and the lab keeps collecting.
 * **Amount per trade (USD)**: new input in the Paper settings. Typed amount = position size, so profit/loss = price move % x amount and a stop-out loses about amount x stop distance %. Empty = the old rule (risk 1% of the paper account). New `Amount` column in the live board and `amount_usd` in the CSV. The bot has the same option: `PAPER_AMOUNT` in `config.py` (None = old rule). The 1:1 reward-to-risk is unchanged.
 * **Stop a trade manually**: a red `Close` button on every open trade (live board and on the Markets chart card). It asks for confirmation, exits at the current bid (BUY) or ask (SELL), charges the same 0.05R fee, saves immediately and counts as a closed trade with reason MANUAL.
 * **Tap a trade to see it on the chart**: tapping a row (open or closed) in the Paper tab switches to Markets, selects that coin and timeframe, and for open trades draws Entry, SL and TP lines on the chart plus a summary card with live P&L.
+* **Filter for open trades**: coin search, Side (All/BUY/SELL), Timeframe (only the ones you have open), P&L now (All/Winning/Losing) and Sort (Newest, Best/Worst P&L, Closest to TP, Closest to SL), with a Clear button and a "showing X of Y" line. The summary cards follow the filter.
 * Trades now store `market_regime` and `agreeing_indicators` (two new CSV columns at the end; old saved trades still load).
 
 ## 6. What was NOT done, and why
