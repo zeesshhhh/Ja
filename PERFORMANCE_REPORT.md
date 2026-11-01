@@ -89,3 +89,19 @@ weights are unchanged and the lab keeps collecting.
 
 ## 8. Modified files
 `app_src/main.dart`, `config.py` and `paper.py` (new `PAPER_AMOUNT` option only), `tests/test_logic.py` (new), `PERFORMANCE_REPORT.md` (new). Everything else is unchanged from your upload.
+
+## 9. Experiments added on Nov 1 (second lab window, 360 snapshots, 12:15-12:55 UTC) - UNVALIDATED
+Offline tests on `lab_signal_snapshots.csv` and `app_paper_trades.csv` (107 closed trades). All in-sample, one rising-market window.
+
+**Added (small, switchable, not compiled):**
+* **Stretch veto** (`gateStretchVeto`, `stretchInds` in `main.dart`): a trend SELL is rejected when 2 or more of RSI(14), Z-score, %B, CCI, MFI, RSI(2) already say oversold.
+  Reason: 97 of 105 trend SELLs had an oversold reading and won 18%; the veto removes 80 of them (15% win), the 25 that pass still only won 28%.
+  BUY side is OFF (`{1: 0, -1: 2}`) because the same test would have blocked 18 of 21 BUYs that won 72%. Set both to 0 to disable.
+* **RSI (14) added to the mean-reversion BUY confirmers**: Z-score + RSI(14) + one more gave 97% direction on 38 signals.
+
+**Tested and NOT added:**
+* Blending the oscillators into the verdict score: with weight 1 only 2 of 360 snapshots reach a 0.5 score, at 0.3 accuracy is 36% (trend alone 33%). It suppresses trades without improving them.
+* Break-even stop on the logged `r_path`: +5R at best (trigger 0.3R) on -54R total, with only about 5 path samples per trade. Not a fix.
+* Mean-reversion SELL: 36% direction (n=11). Stays off.
+
+**Caution:** all 59 mean-reversion BUY signals came from the first 5 of 9 timestamps (one dip-and-rebound event). Treat the 91% as one event, not 59 independent results.
