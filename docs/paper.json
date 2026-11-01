@@ -1,1 +1,1 @@
-{"equity":10000,"open":[],"closed":[],"next_id":0}
+{"equity":10000,"open":[{"id":1,"symbol":"GC=F","strategy":"Momentum","tf":"1d","grade":"experimental","side":-1,"entry":3898.89990234375,"sl":4102.342001216799,"tp":3695.457803470701,"units":0.49154034761704635,"risk":100.0,"opened":"2026-11-01T23:44:23.607325+00:00","hold_h":720,"style":"weeks","why":"Bottom-2 60d momentum (-9%), below EMA50","ctx":{"asset":"futures","agree":1,"mood":-1.5,"htf":-1,"hour":23,"weekday":6,"adx":29.072,"rsi":27.885,"atr_pct":2.087},"mfe_r":0.0,"mae_r":0.0}],"closed":[],"next_id":1}

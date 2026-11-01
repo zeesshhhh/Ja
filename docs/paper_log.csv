@@ -1,1 +1,2 @@
 id,status,opened_utc,closed_utc,hours_held,symbol,asset,strategy,grade,tf,side,entry,sl,tp,risk_pct,planned_rr,exit_price,exit_reason,same_candle_sl_tp,r_multiple,pnl_usd,mfe_r,mae_r,agree,news_mood,htf_trend,adx,rsi,atr_pct,hour_utc,weekday,style,why
+1,open,2026-11-01T23:44:23.607325+00:00,,,GC=F,futures,Momentum,experimental,1d,SELL,3898.89990234375,4102.342001216799,3695.457803470701,5.218,1.0,,,,,,0.0,0.0,1,-1.5,-1,29.072,27.885,2.087,23,6,weeks,"Bottom-2 60d momentum (-9%), below EMA50"
