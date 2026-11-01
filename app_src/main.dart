@@ -1581,6 +1581,8 @@ class _HomeState extends State<Home> {
   final List<GateReject> gateRejects = [];        // most recent signals the gate turned into NO TRADE
   final Map<String, String> gateLast = {};        // coin|tf -> 'hh:mm|OK' or 'hh:mm|reason'
   AppTrade? focusTrade;                           // trade selected in the Paper tab, drawn on the Markets chart
+  String ofSide = 'All', ofTf = 'All', ofPnl = 'All', ofSort = 'Newest';   // filters of the live open-trades table
+  final TextEditingController ofCoinCtl = TextEditingController();
   double paperAmount = 0;                         // USD per paper trade typed in Settings; 0 = risk 1% of the account
   final TextEditingController paperAmountCtl = TextEditingController();
   int paperSignals = 0;                           // signals that passed the score/ADX pre-filter this session
@@ -1638,6 +1640,7 @@ class _HomeState extends State<Home> {
     uiTimer?.cancel();
     liveTimer?.cancel();
     paperAmountCtl.dispose();
+    ofCoinCtl.dispose();
     super.dispose();
   }
 
@@ -3535,9 +3538,46 @@ class _HomeState extends State<Home> {
   /// Live table of open paper trades with the current market rate, P&L and a summary strip.
   Widget liveBoard(List<AppTrade> open) => Builder(builder: (ctx) => liveBoardIn(open, ctx));
 
-  Widget liveBoardIn(List<AppTrade> open, BuildContext ctx) {
+  Widget liveBoardIn(List<AppTrade> allOpen, BuildContext ctx) {
     Color rc(double v) => v >= 0 ? Colors.green : Colors.red;
     String sgn(double v, [int d = 2]) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(d)}';
+    // ---- filters and sorting
+    final tfs = {for (final t in allOpen) t.tf}.toList()..sort((a, b) => tfList.indexOf(a).compareTo(tfList.indexOf(b)));
+    if (ofTf != 'All' && !tfs.contains(ofTf)) ofTf = 'All';
+    final coinQ = ofCoinCtl.text.trim().toUpperCase();
+    bool pnlOk(AppTrade t) {
+      if (ofPnl == 'All') return true;
+      final p = livePnl(t, liveQuotes[t.coin]);
+      if (p == null) return false;
+      return ofPnl == 'Winning' ? p.usd > 0 : p.usd < 0;
+    }
+    final open = allOpen.where((t) => (ofSide == 'All' || (ofSide == 'BUY') == (t.side == 1)) && (ofTf == 'All' || t.tf == ofTf) && pnlOk(t) && (coinQ.isEmpty || t.coin.toUpperCase().contains(coinQ))).toList();
+    double pv(AppTrade t) => livePnl(t, liveQuotes[t.coin])?.usd ?? 0.0;
+    double tpv(AppTrade t) => livePnl(t, liveQuotes[t.coin])?.tpProgress ?? -999.0;
+    double slv(AppTrade t) => livePnl(t, liveQuotes[t.coin])?.slDistPct ?? 999.0;
+    if (ofSort == 'Best P&L') {
+      open.sort((a, b) => pv(b).compareTo(pv(a)));
+    } else if (ofSort == 'Worst P&L') {
+      open.sort((a, b) => pv(a).compareTo(pv(b)));
+    } else if (ofSort == 'Closest to TP') {
+      open.sort((a, b) => tpv(b).compareTo(tpv(a)));
+    } else if (ofSort == 'Closest to SL') {
+      open.sort((a, b) => slv(a).compareTo(slv(b)));
+    } else {
+      open.sort((a, b) => b.opened.compareTo(a.opened));
+    }
+    final filtersOn = ofSide != 'All' || ofTf != 'All' || ofPnl != 'All' || coinQ.isNotEmpty;
+    Widget chips(String label, List<String> values, String cur, void Function(String) apply) => SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(children: [
+            SizedBox(width: 62, child: Text(label, style: const TextStyle(fontSize: 11))),
+            for (final v in values)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ChoiceChip(label: Text(v, style: const TextStyle(fontSize: 12)), selected: cur == v, visualDensity: VisualDensity.compact, onSelected: (_) => setState(() => apply(v))),
+              ),
+          ]),
+        );
     var unreal = 0.0, tpSum = 0.0, slSum = 0.0, known = 0, winNow = 0, loseNow = 0;
     for (final t in open) {
       final p = livePnl(t, liveQuotes[t.coin]);
@@ -3588,6 +3628,37 @@ class _HomeState extends State<Home> {
           IconButton(onPressed: () => refreshLive(force: true), icon: const Icon(Icons.refresh, size: 20), tooltip: 'Refresh prices now'),
         ]),
       ),
+      Card(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Icon(Icons.filter_list, size: 18),
+              const SizedBox(width: 4),
+              Expanded(child: Text('Filter open trades: showing ${open.length} of ${allOpen.length}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
+              if (filtersOn)
+                TextButton(
+                  onPressed: () { ofCoinCtl.clear(); setState(() { ofSide = 'All'; ofTf = 'All'; ofPnl = 'All'; }); },
+                  child: const Text('Clear'),
+                ),
+            ]),
+            TextField(
+              controller: ofCoinCtl,
+              textCapitalization: TextCapitalization.characters,
+              decoration: const InputDecoration(isDense: true, border: OutlineInputBorder(), prefixIcon: Icon(Icons.search, size: 18), hintText: 'Search coin, e.g. BTC'),
+              onChanged: (_) => setState(() {}),
+            ),
+            const SizedBox(height: 4),
+            chips('Side', const ['All', 'BUY', 'SELL'], ofSide, (v) => ofSide = v),
+            chips('Timeframe', ['All', ...tfs], ofTf, (v) => ofTf = v),
+            chips('P&L now', const ['All', 'Winning', 'Losing'], ofPnl, (v) => ofPnl = v),
+            chips('Sort', const ['Newest', 'Best P&L', 'Worst P&L', 'Closest to TP', 'Closest to SL'], ofSort, (v) => ofSort = v),
+          ]),
+        ),
+      ),
+      if (open.isEmpty)
+        const Padding(padding: EdgeInsets.all(12), child: Text('No open trades match this filter.')),
       Wrap(children: [
         statBox('Open trades', '${open.length}'),
         statBox('Unrealized P&L', '${sgn(unreal)} \$', known == 0 ? null : rc(unreal)),
