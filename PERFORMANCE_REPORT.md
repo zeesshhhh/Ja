@@ -106,13 +106,16 @@ Offline tests on `lab_signal_snapshots.csv` and `app_paper_trades.csv` (107 clos
 
 **Caution:** all 59 mean-reversion BUY signals came from the first 5 of 9 timestamps (one dip-and-rebound event). Treat the 91% as one event, not 59 independent results.
 
-## Update (Nov 1, evening)
-* **Stretch veto** in the quality gate: a trend SELL is rejected when the Z-score says price is oversold, and a trend BUY when it says overbought. Reason: in the 12:20 UTC data the trend SELLs were opened on coins the lab marked oversold and were stopped out by the bounce.
-* **Loose-filter warning** in the Paper settings when the quality filter or ADX filter is Off or the strength is below 0.35. In the 12:20 UTC data every filter was off (quality 0, ADX down to 9, score 0.21): 128 of 154 trades were SELLs, 96 opened in one second, 26.5% won.
-* **15m removed from the timeframes once** (one-time migration; switch it back on if you want). 15m has lost in three data sets (about 29% wins over 28 trades).
-* Evidence level: all small samples. 19 closed trades in the latest set (MR 15 trades, 47% wins, -2.1R). Judge the strategies only after 100+ closed trades each.
+## 10. Second Nov 1 window (13:30-16:40 UTC, FALLING market) - what changed
+Data: 1,500 snapshots (33 timestamps, 44 coins), 111 closed paper trades, `app_profit_analysis.csv`.
+* The market flipped from the earlier window (72% of moves up, now 34%) and so did the results. The direction of the market decided almost everything:
+  trend SELL 64% wins / +0.22R (42 trades), trend BUY 15% / -0.74R (26), mean-reversion BUY 33% / -0.40R (42).
+* Mean-reversion oscillators fell to 47-50% direction (MFI 47, Z-score 49.5, CCI 48, %B 47.5) after 71-86% in the rising window. The earlier 91% was a rebound event, as warned.
+* Profit-analysis "PROFITABLE" indicators are just the SELL-side trend voters repeating the same 43 SELL trades (EMA 10 SELL has exactly 43 trades = all SELLs). They are not independent evidence.
+* Quality gate was still mostly off (101 of 111 trades have quality 0). The 10 gated trades won 2 (too few to judge).
+* Stretch veto, both windows combined: vetoed SELLs 43% correct (282), passing SELLs 53% (135). It was better on the passing side in each window, so it stays (SELL side only).
 
-## Update 2 (Nov 1, night)
-* **Latest data**: 33 closed app trades, 33% wins, -13.0R. Mean reversion: 26 trades, 38.5% wins, -7.6R (first half 8 wins of 13, second half 2 of 13 as the market fell). Every MR trade was a dip-buy while 7-10 trend indicators were bearish; 12 of 22 losses never moved up. Your own backtest also had Mean reversion negative (-7.6R, 20 trades). **MR is now off by default** (one-time migration; the switch is still in the Paper settings).
-* **Selectable target (reward:risk)** in the Paper settings: 1:1 (default, unchanged), 1:1.5 or 1:2, plus a "By target" breakdown. Reason: 1:1 needs about 52.5% wins to break even, and the strategies that were profitable in `backtest_results.txt` (Intraday ORB PF 1.21 over 167 trades, Day trading PF 1.18 over 281, Reversal PF 1.14 over 148) won only 38-43%, which only works with targets above 1:1. The bot has the same switch (`RR` in `config.py`).
-* **Not proven**: these backtest edges are small (about +0.09 to +0.13R per trade) and untested forward. Compare 1:1 against 1:1.5 or 1:2 on the same strategies over 100+ trades each.
+**Added: breadth gate for mean-reversion BUY (`mrBreadthMax`, `breadthInds`, `breadthMinCoins`).**
+Breadth = average vote of EMA 20, SMA 20, EMA 50, Parabolic SAR and VWAP (50) over the coins scanned on the same timeframe in the same cycle.
+MR BUY signals with breadth at or below -0.2 won 71% (117 signals, both windows; 55% in the falling window alone, n=60); above -0.2 they won 37% (41 signals).
+Only taken when the market is washed out. Set `mrBreadthMax = 1.0` to turn it off. Found after the fact on 47 timestamp groups, so it is a hypothesis to confirm, not a result.

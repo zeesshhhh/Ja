@@ -29,8 +29,7 @@ BAR_MIN = {"5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
 
 # risk and filters
 MIN_SCORE = 4                # swing score threshold (max 7)
-RR = 1.0                     # reward to risk for every strategy (1.0 = 1:1). NOTE: the profitable strategies in backtest_results.txt (Intraday ORB, Day trading, Reversal)
-                             # won only 38-43% of trades, which needs targets above 1:1. At 1.0 you need about 52.5% wins. Try 1.5 or 2.0 and compare.
+RR = 1.0                     # reward to risk: target = 1x the stop distance (1:1), used by every strategy
 ATR_SL = 1.5
 NEWS_BLACKOUT_MIN = 45
 NEWS_FILTER = True
