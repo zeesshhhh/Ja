@@ -1314,7 +1314,7 @@ bool settleTrade(AppTrade t, List<Candle> cs) {
 }
 
 class PStats {
-  int n = 0, wins = 0, tp = 0, sl = 0, timeouts = 0;
+  int n = 0, wins = 0, tp = 0, sl = 0, timeouts = 0, manual = 0;
   double sumR = 0, grossWin = 0, grossLoss = 0;
   PStats(Iterable<AppTrade> list) {
     for (final t in list.where((x) => !x.isOpen)) {
@@ -1324,6 +1324,7 @@ class PStats {
       if (t.reason == 'TP') tp++;
       if (t.reason == 'SL') sl++;
       if (t.reason == 'TIMEOUT') timeouts++;
+      if (t.reason == 'MANUAL') manual++;
     }
   }
   double get winPct => n == 0 ? 0 : 100.0 * wins / n;
@@ -1579,6 +1580,7 @@ class _HomeState extends State<Home> {
   Timer? liveTimer;
   final List<GateReject> gateRejects = [];        // most recent signals the gate turned into NO TRADE
   final Map<String, String> gateLast = {};        // coin|tf -> 'hh:mm|OK' or 'hh:mm|reason'
+  AppTrade? focusTrade;                           // trade selected in the Paper tab, drawn on the Markets chart
   double paperAmount = 0;                         // USD per paper trade typed in Settings; 0 = risk 1% of the account
   final TextEditingController paperAmountCtl = TextEditingController();
   int paperSignals = 0;                           // signals that passed the score/ADX pre-filter this session
@@ -2503,6 +2505,80 @@ class _HomeState extends State<Home> {
     }
   }
 
+  /// Marks of the selected open paper trade for the Markets chart (only while that coin is shown).
+  List<ChartMark> focusMarks() {
+    final t = focusTrade;
+    if (t == null || !t.isOpen || t.coin != marketSymbol) return const [];
+    return [ChartMark('Entry', t.entry, Colors.blue), ChartMark('SL', t.sl, Colors.red), ChartMark('TP', t.tp, Colors.green)];
+  }
+
+  /// Tapping a trade in the Paper tab opens its coin and timeframe in Markets and draws its entry, stop and target.
+  void openTrade(AppTrade t, BuildContext ctx) {
+    focusTrade = t.isOpen ? t : null;
+    openCoin(t.coin, t.tf, ctx);
+  }
+
+  Widget focusBanner() {
+    final t = focusTrade;
+    if (t == null || !t.isOpen || t.coin != marketSymbol) return const SizedBox.shrink();
+    final p = livePnl(t, liveQuotes[t.coin]);
+    final col = p == null ? null : (p.usd >= 0 ? Colors.green : Colors.red);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Paper trade #${t.id}: ${t.side == 1 ? 'BUY' : 'SELL'} ${t.coin} (${t.tf}), \$${t.notional.toStringAsFixed(0)}', style: const TextStyle(fontWeight: FontWeight.w700)),
+          Text('Entry ${fmtPrice(t.entry)}   SL ${fmtPrice(t.sl)}   TP ${fmtPrice(t.tp)}   open ${sinceText(t.opened)}', style: const TextStyle(fontSize: 12)),
+          if (p != null)
+            Text('Now ${fmtPrice(p.px)}   P&L ${p.usd >= 0 ? '+' : ''}${p.usd.toStringAsFixed(2)} \$ (${p.r >= 0 ? '+' : ''}${p.r.toStringAsFixed(2)}R)',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: col)),
+          Row(children: [
+            TextButton.icon(onPressed: () => closeTradeManually(t), icon: const Icon(Icons.stop_circle_outlined, size: 18), label: const Text('Close trade now')),
+            TextButton(onPressed: () => setState(() => focusTrade = null), child: const Text('Hide lines')),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  /// Closes an open paper trade at the current market rate (bid for a BUY, ask for a SELL), with the same 0.05R fee as other exits.
+  Future<void> closeTradeManually(AppTrade t) async {
+    if (!t.isOpen) return;
+    var q = liveQuotes[t.coin];
+    if (q == null || q.ageSec > 60) {
+      await refreshLive(force: true);
+      q = liveQuotes[t.coin];
+    }
+    double? px = q != null && q.ageSec <= 60 ? q.exitPrice(t.side) : null;
+    px ??= await fetchPrice(t.coin);
+    if (px == null) return toast('No market price for ${t.coin} right now. Try again in a moment.');
+    final r = (px - t.entry) * t.side / t.riskPx - paperCostR;
+    final usd = r * t.riskCash;
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        title: Text('Close ${t.coin} ${t.side == 1 ? 'BUY' : 'SELL'} (${t.tf})?'),
+        content: Text('Exit at ${fmtPrice(px!)} (${t.side == 1 ? 'bid' : 'ask'}).\nResult: ${usd >= 0 ? '+' : ''}${usd.toStringAsFixed(2)} \$ (${r >= 0 ? '+' : ''}${r.toStringAsFixed(2)}R), fee included.\nEntry was ${fmtPrice(t.entry)}.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dctx, false), child: const Text('Keep open')),
+          TextButton(onPressed: () => Navigator.pop(dctx, true), child: const Text('Close trade')),
+        ],
+      ),
+    );
+    if (ok != true || !t.isOpen) return;     // cancelled, or the stop/target was hit while the dialog was open
+    t.exitPx = px;
+    t.reason = 'MANUAL';
+    t.ambiguous = false;
+    t.closed = DateTime.now();
+    t.status = 'closed';
+    t.r = r;
+    if (focusTrade?.id == t.id) focusTrade = null;
+    await savePaper();
+    if (mounted) setState(() {});
+    toast('${t.coin} closed by you: ${usd >= 0 ? '+' : ''}${usd.toStringAsFixed(2)} \$ (${r >= 0 ? '+' : ''}${r.toStringAsFixed(2)}R).');
+  }
+
   void openCoin(String coin, String tf, BuildContext ctx) {
     setState(() { marketSymbol = coin; marketInterval = tf; mtf = {}; });
     loadMarket();
@@ -2786,6 +2862,7 @@ class _HomeState extends State<Home> {
       const SizedBox(height: 10),
       Wrap(spacing: 8, children: [for (final tf in tfList) ChoiceChip(label: Text(tf), selected: marketInterval==tf, onSelected: (_) { setState(() => marketInterval=tf); loadMarket(); })]),
       const SizedBox(height: 10),
+      focusBanner(),
       Card(child: Padding(padding: const EdgeInsets.all(14), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(marketSymbol, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         Text(price == null ? 'Price unavailable' : '${fxPairs.contains(marketSymbol) ? '' : '\$'}${price.toStringAsFixed(decimalsFor(marketSymbol, price))}', style: const TextStyle(fontSize: 27, fontWeight: FontWeight.w700)),
@@ -2793,7 +2870,7 @@ class _HomeState extends State<Home> {
         const SizedBox(height: 12),
         if (marketLoading) const LinearProgressIndicator(),
         if (marketError != null) Text(marketError!, style: const TextStyle(color: Colors.orange)),
-        if (list.length > 1) SizedBox(height: 260, child: CustomPaint(painter: CandlePainter(list, Theme.of(context).brightness==Brightness.dark, an?.sup ?? const <double>[], an?.res ?? const <double>[]), child: const SizedBox.expand())) else const SizedBox(height: 200, child: Center(child: Text('Waiting for candlestick data...'))),
+        if (list.length > 1) SizedBox(height: 260, child: CustomPaint(painter: CandlePainter(list, Theme.of(context).brightness==Brightness.dark, an?.sup ?? const <double>[], an?.res ?? const <double>[], focusMarks()), child: const SizedBox.expand())) else const SizedBox(height: 200, child: Center(child: Text('Waiting for candlestick data...'))),
         const Text('Candles show open, high, low and close. Free APIs may delay or limit data.', style: TextStyle(fontSize: 11)),
         const SizedBox(height: 14),
         Text('Technical indicators', style: Theme.of(context).textTheme.titleMedium),
@@ -3456,7 +3533,9 @@ class _HomeState extends State<Home> {
       );
 
   /// Live table of open paper trades with the current market rate, P&L and a summary strip.
-  Widget liveBoard(List<AppTrade> open) {
+  Widget liveBoard(List<AppTrade> open) => Builder(builder: (ctx) => liveBoardIn(open, ctx));
+
+  Widget liveBoardIn(List<AppTrade> open, BuildContext ctx) {
     Color rc(double v) => v >= 0 ? Colors.green : Colors.red;
     String sgn(double v, [int d = 2]) => '${v >= 0 ? '+' : ''}${v.toStringAsFixed(d)}';
     var unreal = 0.0, tpSum = 0.0, slSum = 0.0, known = 0, winNow = 0, loseNow = 0;
@@ -3480,7 +3559,7 @@ class _HomeState extends State<Home> {
       final st = q == null ? 'OFFLINE' : q.status;
       final stc = st == 'LIVE' ? Colors.green : st == 'STALE' ? Colors.orange : Colors.red;
       final col = p == null ? null : rc(p.usd);
-      return DataRow(cells: [
+      return DataRow(onSelectChanged: (_) => openTrade(t, ctx), cells: [
         DataCell(Text('${t.coin} ${t.tf}', style: const TextStyle(fontWeight: FontWeight.w600))),
         DataCell(Text(q?.source ?? exchangeLabel(t.coin), style: const TextStyle(fontSize: 11))),
         DataCell(Text(t.side == 1 ? 'BUY' : 'SELL', style: TextStyle(color: t.side == 1 ? Colors.green : Colors.red, fontWeight: FontWeight.w700))),
@@ -3495,6 +3574,7 @@ class _HomeState extends State<Home> {
         DataCell(Text(p == null ? '-' : '${p.slDistPct.toStringAsFixed(2)}% (${p.slDistR.toStringAsFixed(1)}R)')),
         DataCell(Text('OPEN $st', style: TextStyle(fontWeight: FontWeight.w600, color: stc))),
         DataCell(Text(sinceText(t.opened))),
+        DataCell(TextButton(onPressed: () => closeTradeManually(t), child: const Text('Close', style: TextStyle(color: Colors.red)))),
       ]);
     }
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3521,6 +3601,7 @@ class _HomeState extends State<Home> {
         child: SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: DataTable(
+            showCheckboxColumn: false,
             columnSpacing: 14,
             headingRowHeight: 34,
             dataRowMinHeight: 36,
@@ -3530,7 +3611,7 @@ class _HomeState extends State<Home> {
               DataColumn(label: Text('Entry')), DataColumn(label: Text('Current rate')), DataColumn(label: Text('TP')),
               DataColumn(label: Text('SL')), DataColumn(label: Text('Unrealized P&L')), DataColumn(label: Text('P&L %')),
               DataColumn(label: Text('TP progress')), DataColumn(label: Text('SL distance')), DataColumn(label: Text('Status')),
-              DataColumn(label: Text('Open for')),
+              DataColumn(label: Text('Open for')), DataColumn(label: Text('Stop trade')),
             ],
             rows: [for (final t in open.take(150)) row(t)],
           ),
@@ -3539,7 +3620,7 @@ class _HomeState extends State<Home> {
       const Padding(
         padding: EdgeInsets.fromLTRB(4, 2, 4, 0),
         child: Text('Rates are polled every 3 seconds (not a WebSocket stream). Binance coins use the best bid/ask: a BUY is valued at the bid and a SELL at the ask, minus the 0.05R fee. '
-            'Forex, gold and oil use Yahoo Finance and can lag. LIVE under 12 s old, STALE under 60 s, otherwise OFFLINE. Open trades are not counted as wins or losses until they close.',
+            'Tap a row to open that trade on the Markets chart with its entry, SL and TP lines; tap Close to stop it at the current rate. Forex, gold and oil use Yahoo Finance and can lag. LIVE under 12 s old, STALE under 60 s, otherwise OFFLINE. Open trades are not counted as wins or losses until they close.',
             style: TextStyle(fontSize: 10)),
       ),
     ]);
@@ -3758,7 +3839,7 @@ class _HomeState extends State<Home> {
               const SizedBox(height: 6),
               Text('Accuracy: ${st.winPct.toStringAsFixed(0)}% win rate (${st.wins} of ${st.n})'),
               Text('Average ${sgn(st.avgR)}R per trade, profit factor ${st.pf.toStringAsFixed(2)}, total ${sgn(st.sumR, 1)}R'),
-              Text('Hit target ${st.tp}, hit stop ${st.sl}, timed out ${st.timeouts}', style: const TextStyle(fontSize: 12)),
+              Text('Hit target ${st.tp}, hit stop ${st.sl}, timed out ${st.timeouts}, closed by you ${st.manual}', style: const TextStyle(fontSize: 12)),
             ],
           ]),
         ),
@@ -3791,13 +3872,14 @@ class _HomeState extends State<Home> {
       if (closed.isNotEmpty) ...[
         const Padding(padding: EdgeInsets.fromLTRB(4, 12, 4, 2), child: Text('Recent closed trades', style: TextStyle(fontWeight: FontWeight.w600))),
         for (final t in closed.take(25))
-          ListTile(
+          Builder(builder: (ctx) => ListTile(
+            onTap: () => openTrade(t, ctx),
             dense: true,
             title: Text('${t.coin} ${t.side == 1 ? 'BUY' : 'SELL'} (${t.tf})  ${t.reason}${t.ambiguous ? ' *' : ''}'),
             leading: Icon(t.r > 0 ? Icons.check_circle : Icons.cancel, color: t.r > 0 ? Colors.green : Colors.red, size: 18),
             subtitle: Text('CLOSED ${ago(t.closed?.toIso8601String())} at ${fmtPrice(t.exitPx)}, ${t.verdict}'),
             trailing: Text('${sgn(t.r)} R', style: TextStyle(fontWeight: FontWeight.w600, color: rc(t.r))),
-          ),
+          )),
         const Text('* stop and target were both touched in the same candle, counted as a stop.', style: TextStyle(fontSize: 11)),
       ],
       if (trades.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('No trades yet. Turn on Auto paper trading, or open a coin in Markets and tap Paper trade.', textAlign: TextAlign.center)),
@@ -4009,16 +4091,25 @@ class Candle {
   Candle(this.time, this.open, this.high, this.low, this.close, [this.volume = 0]);
 }
 
+class ChartMark {
+  final String label;
+  final double price;
+  final Color color;
+  const ChartMark(this.label, this.price, this.color);
+}
+
 class CandlePainter extends CustomPainter {
   final List<Candle> candles;
   final bool dark;
   final List<double> sup, res;
-  CandlePainter(this.candles, this.dark, [this.sup = const [], this.res = const []]);
+  final List<ChartMark> marks;   // selected paper trade: entry, stop and target lines
+  CandlePainter(this.candles, this.dark, [this.sup = const [], this.res = const [], this.marks = const []]);
   @override
   void paint(Canvas canvas, Size size) {
     if (candles.isEmpty || size.width <= 0 || size.height <= 0) return;
-    final minV = candles.map((c)=>c.low).reduce(math.min);
-    final maxV = candles.map((c)=>c.high).reduce(math.max);
+    var minV = candles.map((c)=>c.low).reduce(math.min);
+    var maxV = candles.map((c)=>c.high).reduce(math.max);
+    for (final m in marks) { minV = math.min(minV, m.price); maxV = math.max(maxV, m.price); }   // keep the trade levels on screen
     final range = (maxV-minV).abs() < 1e-9 ? 1.0 : maxV-minV;
     final pad = 12.0;
     double y(double v) => size.height-pad-(v-minV)/range*(size.height-pad*2);
@@ -4035,17 +4126,18 @@ class CandlePainter extends CustomPainter {
       canvas.drawRect(rect,Paint()..color=color);
     }
     final tp=TextPainter(textDirection: TextDirection.ltr);
-    void level(double v, Color col) {
+    void level(double v, Color col, [String label = '']) {
       if (v < minV || v > maxV) return;
       final yy = y(v);
       final p = Paint()..color = col.withOpacity(.75)..strokeWidth = 1;
       for (double x = 0; x < size.width; x += 10) { canvas.drawLine(Offset(x, yy), Offset(math.min(x + 5, size.width), yy), p); }
-      tp.text = TextSpan(text: fmtPrice(v), style: TextStyle(fontSize: 10, color: col));
+      tp.text = TextSpan(text: label.isEmpty ? fmtPrice(v) : '$label ${fmtPrice(v)}', style: TextStyle(fontSize: 10, color: col, fontWeight: label.isEmpty ? FontWeight.normal : FontWeight.w700));
       tp.layout();
       tp.paint(canvas, Offset(size.width - tp.width - 2, yy - 12));
     }
     for (final v in sup) { level(v, Colors.green); }
     for (final v in res) { level(v, Colors.red); }
+    for (final m in marks) { level(m.price, m.color, m.label); }
     tp.text=TextSpan(text:fmtPrice(maxV),style:TextStyle(fontSize:10,color:dark?Colors.white70:Colors.black54)); tp.layout(); tp.paint(canvas,Offset(2,0));
     tp.text=TextSpan(text:fmtPrice(minV),style:TextStyle(fontSize:10,color:dark?Colors.white70:Colors.black54)); tp.layout(); tp.paint(canvas,Offset(2,size.height-14));
   }
