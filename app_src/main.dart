@@ -997,6 +997,9 @@ String untilText(DateTime t) {
   return d.isNegative ? '$txt ago' : 'in $txt';
 }
 
+/// Target distance as a multiple of the stop distance (1.0 = 1:1). Set in the Paper settings; applies to new trades.
+double planRR = 1.0;
+
 // Stop / target using chart support and resistance when they are close enough to be useful.
 List<double> tradePlan(Analysis a) {
   final side = a.side;
@@ -1007,11 +1010,11 @@ List<double> tradePlan(Analysis a) {
     if (dist >= 0.8 * a.atr && dist <= 3 * a.atr) sl = lvl;
   }
   final risk = (a.last - sl).abs();
-  var tp = a.last + side * risk;                    // 1:1 reward to risk
+  var tp = a.last + side * risk * planRR;           // reward to risk, 1:1 by default
   final tgt = side == 1 ? (a.res.isEmpty ? double.nan : a.res.first) : (a.sup.isEmpty ? double.nan : a.sup.first);
   if (!tgt.isNaN) {
     final dist = (tgt - a.last).abs();
-    if (dist >= 0.8 * risk && dist < risk) tp = tgt;   // a nearby level just before 1R
+    if (dist >= 0.8 * risk * planRR && dist < risk * planRR) tp = tgt;   // a nearby level just before the target
   }
   return [sl, tp, risk == 0 ? 0.0 : (tp - a.last).abs() / risk];
 }
@@ -1218,13 +1221,6 @@ const gateCandleBodyAtr = 0.7;                   // reject if the last closed ca
 const gateStretchVeto = {1: 0, -1: 2};
 const stretchInds = ['RSI (14)', 'Z-score (20)', 'Bollinger %B (20,2)', 'CCI (20)', 'MFI (14)', 'RSI (2)'];
 
-// EXPERIMENT (Nov 1 Lab, two windows): mean-reversion BUYs won 71% (117 signals) when the market was already bearish and 37% (41 signals) when it was not.
-// Breadth = average vote (-1..+1) of these indicators over the coins scanned on the same timeframe in the same cycle.
-// A mean-reversion BUY is only taken when breadth is at or below mrBreadthMax. 1.0 = gate off. Skipped when fewer than breadthMinCoins coins were scanned.
-const mrBreadthMax = -0.2;
-const breadthInds = ['EMA 20', 'SMA 20', 'EMA 50', 'Parabolic SAR', 'VWAP (50)'];
-const breadthMinCoins = 10;
-
 /// Mean-reversion BUY setup (experimental, tracked as its own strategy "App MR"). The Lab's best indicators (Z-score, RSI(2), CCI,
 /// Bollinger %B, MFI, Stochastic RSI, Williams %R) all measure "how stretched is price", so they are treated as one idea:
 /// the Z-score must fire and at least one more must agree. Lab data (Nov 1): after such BUY signals price rose 64% of the time,
@@ -1280,6 +1276,7 @@ class AppTrade {
 
   bool get isOpen => status == 'open';
   double get riskPx => (entry - sl).abs();
+  double get plannedRR => riskPx > 0 ? (tp - entry).abs() / riskPx : 0.0;
   /// Position size in USD: the amount typed in Settings, or the size implied by the 1% risk rule.
   double get notional => amount > 0 ? amount : (riskPx > 0 ? riskCash * entry / riskPx : 0.0);
   double get pnl => r * riskCash;
@@ -1688,7 +1685,8 @@ class _HomeState extends State<Home> {
   List<AppTrade> trades = [];
   bool autoPaper = false, paperBusy = false;
   double paperMinScore = 0.50;
-  int paperMaxOpen = 1000000, paperMinQ = 4, paperRejected = 0, paperCoins = 20, paperMinAdx = 25;
+  int paperMaxOpen = 1000000, paperMinQ = 5, paperRejected = 0, paperCoins = 20, paperMinAdx = 25;
+  double paperMinRvol = 1.5;
   Set<String> paperTfs = {'5m', '1h', '4h'};
   bool paperScanBusy = false;
   final Map<String, int> paperLogged = {};     // coin|tf -> candle close already handled
@@ -1704,7 +1702,7 @@ class _HomeState extends State<Home> {
   AppTrade? focusTrade;                           // trade selected in the Paper tab, drawn on the Markets chart
   String ofSide = 'All', ofTf = 'All', ofPnl = 'All', ofSort = 'Newest';   // filters of the live open-trades table
   final TextEditingController ofCoinCtl = TextEditingController();
-  bool paperMr = true;                            // mean-reversion BUY strategy on/off
+  bool paperMr = false;                            // mean-reversion BUY strategy on/off
   DateTime lastPathSave = DateTime.now();
   double paperAmount = 0;                         // USD per paper trade typed in Settings; 0 = risk 1% of the account
   final TextEditingController paperAmountCtl = TextEditingController();
@@ -2042,13 +2040,25 @@ class _HomeState extends State<Home> {
       paperMinScore = p.getDouble('app_paper_min') ?? 0.50;
       paperMaxOpen = p.getInt('app_paper_max') ?? 1000000;
       paperAmount = p.getDouble('app_paper_amount') ?? 0;
-      paperMr = p.getBool('app_paper_mr') ?? true;
+      paperMr = p.getBool('app_paper_mr') ?? false;
+      planRR = p.getDouble('app_paper_rr') ?? 1.0;
+      if (!(p.getBool('app_paper_v7') ?? false)) {
+        paperMr = false;      // mean reversion lost in your backtest (-7.6R, 20 trades) and in paper (-7.6R, 26 trades): off until proven; switch it back on if you want
+        await p.setBool('app_paper_v7', true);
+      }
       paperAmountCtl.text = paperAmount > 0 ? paperAmount.toStringAsFixed(paperAmount == paperAmount.roundToDouble() ? 0 : 2) : '';
       paperCoins = p.getInt('app_paper_coins') ?? 20;
       final tl = p.getStringList('app_paper_tfs');
       if (tl != null && tl.isNotEmpty) paperTfs = tl.toSet();
-      paperMinQ = p.getInt('app_paper_q') ?? 4;
+      paperMinQ = p.getInt('app_paper_q') ?? 5;
+      paperMinRvol = p.getDouble('app_paper_rvol') ?? 1.5;
       paperMinAdx = p.getInt('app_paper_adx') ?? 25;
+      if (!(p.getBool('app_paper_v6') ?? false)) {
+        paperTfs.remove('15m');                       // 15m lost in three data sets in a row (about 29% wins over 28 trades); you can switch it back on
+        if (paperTfs.isEmpty) paperTfs = {'5m'};
+        await p.setBool('app_paper_v6', true);
+        await p.setStringList('app_paper_tfs', paperTfs.toList());
+      }
       if (!(p.getBool('app_paper_v4') ?? false)) {
         paperMaxOpen = 1000000;                       // no limit on open paper trades
         await p.setBool('app_paper_v4', true);
@@ -2072,6 +2082,15 @@ class _HomeState extends State<Home> {
         await p.setInt('app_paper_q', paperMinQ);
         await p.setStringList('app_paper_tfs', paperTfs.toList());
       }
+      if (!(p.getBool('app_paper_v8') ?? false)) {
+        // Tighten the default entry gate based on the latest supplied paper-trade sample:
+        // quality 5/5 and RVOL >= 1.5x were stronger in-sample, but require forward validation.
+        paperMinQ = 5;
+        paperMinRvol = 1.5;
+        await p.setInt('app_paper_q', paperMinQ);
+        await p.setDouble('app_paper_rvol', paperMinRvol);
+        await p.setBool('app_paper_v8', true);
+      }
     } catch (_) {}
     paperLoaded = true;
     if (autoPaper) setBackgroundService(true);
@@ -2092,7 +2111,9 @@ class _HomeState extends State<Home> {
       await p.setInt('app_paper_max', paperMaxOpen);
       await p.setDouble('app_paper_amount', paperAmount);
       await p.setBool('app_paper_mr', paperMr);
+      await p.setDouble('app_paper_rr', planRR);
       await p.setInt('app_paper_q', paperMinQ);
+      await p.setDouble('app_paper_rvol', paperMinRvol);
       await p.setInt('app_paper_adx', paperMinAdx);
       await p.setInt('app_paper_coins', paperCoins);
       await p.setStringList('app_paper_tfs', paperTfs.toList());
@@ -2104,7 +2125,7 @@ class _HomeState extends State<Home> {
   AppTrade? openPaperTrade(String coin, String tf, Analysis a, String source, [Map<String, dynamic>? q]) {
     if (a.side == 0 || a.atr.isNaN || a.atr <= 0) return null;
     final plan = tradePlan(a);
-    if (plan[2] < 0.75) return null;
+    if (plan[2] < 0.75 * planRR) return null;
     if (a.atr / a.last * 100 > 8 || plan[0] <= 0 || plan[1] <= 0) return null;   // illiquid coins with absurd stops, or a target below zero
     if (trades.any((t) => t.isOpen && t.coin == coin && t.tf == tf)) return null;
     final stopDist = (a.last - plan[0]).abs();
@@ -2165,8 +2186,21 @@ class _HomeState extends State<Home> {
       final avg = vols.sublist(vols.length - 21, vols.length - 1).fold<double>(0, (a, b) => a + b) / 20;
       rvol = avg > 0 ? vols.last / avg : null;
     }
-    if (veto == null && rvol != null && rvol < 0.7) veto = 'dead volume (${rvol.toStringAsFixed(2)}x average)';
-    if (veto == null && rvol != null && rvol > 3.0) veto = 'volume spike may be exhaustion (${rvol.toStringAsFixed(2)}x average)';
+    if (veto == null && paperMinRvol > 0 && rvol == null) {
+      veto = 'RVOL unavailable: volume confirmation is required';
+    }
+    if (veto == null && paperMinRvol > 0 && rvol != null && rvol < paperMinRvol) {
+      veto = 'weak relative volume (${rvol.toStringAsFixed(2)}x; needs ${paperMinRvol.toStringAsFixed(1)}x)';
+    }
+    if (veto == null && paperMinRvol == 0 && rvol != null && rvol < 0.7) {
+      veto = 'dead volume (${rvol.toStringAsFixed(2)}x average)';
+    }
+    if (veto == null && rvol != null && rvol > 3.0) {
+      veto = 'volume spike may be exhaustion (${rvol.toStringAsFixed(2)}x average)';
+    }
+    // ---- stretch veto: the Lab's Z-score says price is already stretched against this trade (a SELL into an oversold bounce, a BUY into an overbought run)
+    final zs = sigOf(ac, 'Z-score (20)');
+    if (veto == null && zs == -side) veto = 'Z-score says price is ${side == 1 ? 'overbought' : 'oversold'}, a ${side == 1 ? 'BUY' : 'SELL'} here chases the move';
     // ---- market regime, entry quality, support/resistance and candle momentum
     var regime = const Regime('Unknown', true, '');
     if (closed.length >= 120) {
@@ -2249,7 +2283,8 @@ class _HomeState extends State<Home> {
     var q = 0, htf = 0;
     if (h1 != null && htfSide(h1) == side) { q++; htf++; }
     if (h2 != null && htfSide(h2) == side) { q++; htf++; }
-    if (rvol != null && rvol >= 1.2 && rvol <= 3.0) q++;
+    final qRvolMin = paperMinRvol > 0 ? paperMinRvol : 1.2;
+    if (rvol != null && rvol >= qRvolMin && rvol <= 3.0) q++;
     if (!ac.adx.isNaN && ac.adx >= 20) q++;
     if (crowdKnown && crowdOk) q++;
     final why = veto ?? (q < paperMinQ ? 'quality $q of 5, needs $paperMinQ' : null);
@@ -2284,7 +2319,6 @@ class _HomeState extends State<Home> {
       if (jobs.isEmpty) return;
       if (mounted) setState(() => paperStatus = 'Checking ${jobs.length} coin/timeframe pairs...');
       final cands = <Map<String, dynamic>>[];
-      final bSum = <String, double>{}, bN = <String, int>{};      // market breadth per timeframe, filled while scanning
       for (var i = 0; i < jobs.length; i += 8) {
         final res = await Future.wait(jobs.skip(i).take(8).map<Future<Map<String, dynamic>?>>((j) async {
           try {
@@ -2294,12 +2328,6 @@ class _HomeState extends State<Home> {
             if (cs[cs.length - 2].time.millisecondsSinceEpoch + barMs(j[1]) != t0) return null;   // exchange has not published it yet, retry next minute
             paperLogged['${j[0]}|${j[1]}'] = t0;
             final ac = analyze(cs.sublist(0, cs.length - 1), 2);
-            var bs = 0;
-            for (final bn in breadthInds) {
-              bs += sigOf(ac, bn);
-            }
-            bSum[j[1]] = (bSum[j[1]] ?? 0.0) + bs / breadthInds.length;
-            bN[j[1]] = (bN[j[1]] ?? 0) + 1;
             final trendOk = !(ac.side == 0 || ac.score.abs() < paperMinScore) && !(paperMinAdx > 0 && !ac.adx.isNaN && ac.adx < paperMinAdx);   // no trend, no edge in the Lab
             final mr = paperMr ? mrSignal(ac) : null;
             if (!trendOk && mr == null) return null;
@@ -2330,16 +2358,6 @@ class _HomeState extends State<Home> {
         if (!isTrend) {
           // mean-reversion BUY: same news blackout, cooldown, one-trade-per-coin and 1:1 plan as the trend trades, its own label
           if (mrSig == null) continue;
-          if (mrBreadthMax < 1.0 && (bN[tf] ?? 0) >= breadthMinCoins) {
-            final breadth = bSum[tf]! / bN[tf]!;
-            if (breadth > mrBreadthMax) {                              // the market is not oversold: this is a lone dip, not a washout
-              rejected++;
-              paperRejected++;
-              gateRejects.insert(0, GateReject(DateTime.now(), coin, tf, mrSig.side, 'market is not oversold (breadth ${breadth.toStringAsFixed(2)})'));
-              if (gateRejects.length > 60) gateRejects.removeLast();
-              continue;
-            }
-          }
           final mrAnalysis = Analysis(ac.ma, ac.osc, ac.info, ac.buys, ac.sells, ac.neutrals, cs.last.open, ac.atr, ac.adx, mrSig.side * 0.5, ac.sup, ac.res);
           final nm = openPaperTrade(coin, tf, mrAnalysis, 'MR', {'inds': mrSig.inds, 'regime': 'Mean reversion'});
           if (nm != null) {
@@ -2356,7 +2374,7 @@ class _HomeState extends State<Home> {
           cs.last.open, ac.atr, ac.adx, ac.score, ac.sup, ac.res,
         );
         Map<String, dynamic>? q;
-        if (paperMinQ > 0) {
+        if (paperMinQ > 0 || paperMinRvol > 0) {
           if (++qchecked > 40) break;                                  // keep each cycle fast
           q = await qualify(coin, tf, cs, ac);
           if (q == null) continue;
@@ -2647,7 +2665,7 @@ class _HomeState extends State<Home> {
       add(t.score.abs() >= .5 ? 'strong signals (score 0.5+)' : t.score.abs() >= .35 ? 'medium signals (0.35-0.5)' : 'weak signals (0.2-0.35)', t);
       add(t.adx == null ? 'ADX unknown' : t.adx! >= 25 ? 'trending (ADX 25+)' : t.adx! < 20 ? 'ranging (ADX under 20)' : 'moderate trend (ADX 20-25)', t);
       add(t.mood >= 2 ? 'bullish news' : t.mood <= -2 ? 'bearish news' : 'mixed news', t);
-      add(t.quality == 0 ? 'unfiltered trades' : t.quality >= 4 ? 'quality 4-5' : 'quality 3', t);
+      add(t.quality == 0 ? 'unfiltered trades' : 'quality ${t.quality} of 5', t);
     }
     final list = groups.entries.where((e) => e.value.length >= 5).map((e) => MapEntry(e.key, PStats(e.value))).toList()
       ..sort((a, b) => b.value.avgR.compareTo(a.value.avgR));
@@ -4041,6 +4059,14 @@ class _HomeState extends State<Home> {
               const Expanded(child: Text('Auto paper trading', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
               Switch(value: autoPaper, onChanged: setAutoPaper),
             ]),
+            if (autoPaper && (paperMinQ == 0 || paperMinRvol == 0 || paperMinAdx == 0 || paperMinScore < 0.35))
+              Container(
+                margin: const EdgeInsets.only(top: 6, bottom: 4),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(color: Colors.orange.withOpacity(.15), borderRadius: BorderRadius.circular(8)),
+                child: const Text('Filters are loosened. With the quality filter Off, late and stretched entries are NOT rejected, and in your own data those entries lost most of the money. '
+                    'Recommended: Strong (0.5), ADX 25, quality 5 of 5, RVOL 1.5x.', style: TextStyle(fontSize: 12)),
+              ),
             SwitchListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
@@ -4079,10 +4105,19 @@ class _HomeState extends State<Home> {
               for (final o in const {'Off': 0, '20': 20, '25': 25, '30': 30}.entries)
                 ChoiceChip(label: Text(o.key), selected: paperMinAdx == o.value, onSelected: (_) { setState(() => paperMinAdx = o.value); savePaper(); }),
             ]),
-            const Text('Quality filter (higher timeframes, Bitcoin trend, volume, closed-candle check)', style: TextStyle(fontSize: 12)),
+            const Text('Quality filter (higher timeframes, Bitcoin trend, RVOL, ADX and crowding)', style: TextStyle(fontSize: 12)),
             Wrap(spacing: 8, children: [
-              for (final o in const {'Off': 0, '3 of 5': 3, '4 of 5': 4}.entries)
+              for (final o in const {'Off': 0, '3 of 5': 3, '4 of 5': 4, '5 of 5': 5}.entries)
                 ChoiceChip(label: Text(o.key), selected: paperMinQ == o.value, onSelected: (_) { setState(() => paperMinQ = o.value); savePaper(); }),
+            ]),
+            const SizedBox(height: 6),
+            const Text('Minimum Relative Volume (last closed candle vs previous 20)', style: TextStyle(fontSize: 12)),
+            Wrap(spacing: 8, children: [
+              for (final o in const {'Off': 0.0, '1.2x': 1.2, '1.5x': 1.5, '1.8x': 1.8}.entries)
+                ChoiceChip(label: Text(o.key), selected: paperMinRvol == o.value, onSelected: (_) {
+                  setState(() => paperMinRvol = o.value);
+                  savePaper();
+                }),
             ]),
             if (paperRejected > 0) Text('Filtered out $paperRejected weak setups this session.', style: const TextStyle(fontSize: 11)),
             const Text('Max open trades', style: TextStyle(fontSize: 12)),
@@ -4090,6 +4125,17 @@ class _HomeState extends State<Home> {
               for (final n in [20, 50, 100, 1000000])
                 ChoiceChip(label: Text(n >= 1000000 ? 'No limit' : '$n'), selected: paperMaxOpen == n, onSelected: (_) { setState(() => paperMaxOpen = n); savePaper(); }),
             ]),
+            const SizedBox(height: 8),
+            const Text('Target (reward : risk)', style: TextStyle(fontSize: 12)),
+            Wrap(spacing: 8, children: [
+              for (final o in const {'1:1': 1.0, '1:1.5': 1.5, '1:2': 2.0}.entries)
+                ChoiceChip(label: Text(o.key), selected: planRR == o.value, onSelected: (_) { setState(() => planRR = o.value); savePaper(); }),
+            ]),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: const Text('1:1 needs about 52.5% wins to break even (fees included). 1:2 needs about 35%, but wins less often. Your own backtest\'s profitable strategies won only 38 to 43% of the time, '
+                  'which only pays with targets above 1:1. Applies to new trades; compare them in "By target" below.', style: TextStyle(fontSize: 11)),
+            ),
             const SizedBox(height: 8),
             const Text('Amount per trade (USD)', style: TextStyle(fontSize: 12)),
             TextField(
@@ -4147,6 +4193,7 @@ class _HomeState extends State<Home> {
       if (open.isNotEmpty) liveBoard(open),
       if (st.n > 0) ...[
         group('By strategy', by((t) => t.source == 'auto' ? 'Trend (auto)' : t.source == 'MR' ? 'Mean reversion (MR)' : 'Manual')),
+        group('By target (reward:risk)', by((t) => '1:${t.plannedRR.toStringAsFixed(1)}')),
         group('By timeframe', by((t) => t.tf)),
         group('By trading style', by((t) => styleOf(t.tf))),
         group('By direction', by((t) => t.side == 1 ? 'BUY' : 'SELL')),
