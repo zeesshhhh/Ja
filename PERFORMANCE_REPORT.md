@@ -116,19 +116,3 @@ Offline tests on `lab_signal_snapshots.csv` and `app_paper_trades.csv` (107 clos
 * **Latest data**: 33 closed app trades, 33% wins, -13.0R. Mean reversion: 26 trades, 38.5% wins, -7.6R (first half 8 wins of 13, second half 2 of 13 as the market fell). Every MR trade was a dip-buy while 7-10 trend indicators were bearish; 12 of 22 losses never moved up. Your own backtest also had Mean reversion negative (-7.6R, 20 trades). **MR is now off by default** (one-time migration; the switch is still in the Paper settings).
 * **Selectable target (reward:risk)** in the Paper settings: 1:1 (default, unchanged), 1:1.5 or 1:2, plus a "By target" breakdown. Reason: 1:1 needs about 52.5% wins to break even, and the strategies that were profitable in `backtest_results.txt` (Intraday ORB PF 1.21 over 167 trades, Day trading PF 1.18 over 281, Reversal PF 1.14 over 148) won only 38-43%, which only works with targets above 1:1. The bot has the same switch (`RR` in `config.py`).
 * **Not proven**: these backtest edges are small (about +0.09 to +0.13R per trade) and untested forward. Compare 1:1 against 1:1.5 or 1:2 on the same strategies over 100+ trades each.
-
-
-## Quality + RVOL filter update (Nov 3, 2026)
-
-The Android app now defaults to **quality 5/5** and **minimum RVOL 1.5x** (last closed candle volume divided by the average volume of the previous 20 closed candles). The RVOL setting is independently configurable as Off, 1.2x, 1.5x or 1.8x. RVOL above 3.0x remains rejected as a possible exhaustion spike. If RVOL is required but unavailable, the setup is rejected rather than silently treating missing volume as confirmation. The Quality filter and RVOL filter now run independently, so RVOL can still be enforced when the quality-score threshold is Off.
-
-Latest supplied app CSV (39 closed trades; in-sample only):
-- Quality 5/5: 10 wins / 14 trades (71.4%), +5.30R.
-- Quality 4/5: 10 wins / 24 trades (41.7%), -5.36R.
-- RVOL 1.57-2.85x: 8 wins / 10 trades (80.0%), +5.50R.
-- RVOL 0.70-1.00x: 4 wins / 11 trades (36.4%), -3.71R.
-- RVOL 1.00-1.20x: 2 wins / 6 trades (33.3%), -2.30R.
-
-These are small, retrospective groups and may be affected by selection bias and market regime. They justify a forward paper-trading experiment, not a claim of proven predictive edge. The app's existing five quality points remain: two higher-timeframe confirmations, RVOL, ADX >=20, and non-adverse funding/news crowding.
-
-Validation limitation: Flutter/Dart SDK is not available in this environment, so the Dart app could not be compiled or run here. The Python bot engine was not modified; these changes are in the Flutter app only. Build the APK with the repository's GitHub Actions workflow and inspect the resulting build log.
