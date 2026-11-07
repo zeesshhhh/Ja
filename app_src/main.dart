@@ -1685,8 +1685,7 @@ class _HomeState extends State<Home> {
   List<AppTrade> trades = [];
   bool autoPaper = false, paperBusy = false;
   double paperMinScore = 0.50;
-  int paperMaxOpen = 1000000, paperMinQ = 5, paperRejected = 0, paperCoins = 20, paperMinAdx = 25;
-  double paperMinRvol = 1.5;
+  int paperMaxOpen = 1000000, paperMinQ = 4, paperRejected = 0, paperCoins = 20, paperMinAdx = 25;
   Set<String> paperTfs = {'5m', '1h', '4h'};
   bool paperScanBusy = false;
   final Map<String, int> paperLogged = {};     // coin|tf -> candle close already handled
@@ -2050,8 +2049,7 @@ class _HomeState extends State<Home> {
       paperCoins = p.getInt('app_paper_coins') ?? 20;
       final tl = p.getStringList('app_paper_tfs');
       if (tl != null && tl.isNotEmpty) paperTfs = tl.toSet();
-      paperMinQ = p.getInt('app_paper_q') ?? 5;
-      paperMinRvol = p.getDouble('app_paper_rvol') ?? 1.5;
+      paperMinQ = p.getInt('app_paper_q') ?? 4;
       paperMinAdx = p.getInt('app_paper_adx') ?? 25;
       if (!(p.getBool('app_paper_v6') ?? false)) {
         paperTfs.remove('15m');                       // 15m lost in three data sets in a row (about 29% wins over 28 trades); you can switch it back on
@@ -2082,15 +2080,6 @@ class _HomeState extends State<Home> {
         await p.setInt('app_paper_q', paperMinQ);
         await p.setStringList('app_paper_tfs', paperTfs.toList());
       }
-      if (!(p.getBool('app_paper_v8') ?? false)) {
-        // Tighten the default entry gate based on the latest supplied paper-trade sample:
-        // quality 5/5 and RVOL >= 1.5x were stronger in-sample, but require forward validation.
-        paperMinQ = 5;
-        paperMinRvol = 1.5;
-        await p.setInt('app_paper_q', paperMinQ);
-        await p.setDouble('app_paper_rvol', paperMinRvol);
-        await p.setBool('app_paper_v8', true);
-      }
     } catch (_) {}
     paperLoaded = true;
     if (autoPaper) setBackgroundService(true);
@@ -2113,7 +2102,6 @@ class _HomeState extends State<Home> {
       await p.setBool('app_paper_mr', paperMr);
       await p.setDouble('app_paper_rr', planRR);
       await p.setInt('app_paper_q', paperMinQ);
-      await p.setDouble('app_paper_rvol', paperMinRvol);
       await p.setInt('app_paper_adx', paperMinAdx);
       await p.setInt('app_paper_coins', paperCoins);
       await p.setStringList('app_paper_tfs', paperTfs.toList());
@@ -2186,18 +2174,8 @@ class _HomeState extends State<Home> {
       final avg = vols.sublist(vols.length - 21, vols.length - 1).fold<double>(0, (a, b) => a + b) / 20;
       rvol = avg > 0 ? vols.last / avg : null;
     }
-    if (veto == null && paperMinRvol > 0 && rvol == null) {
-      veto = 'RVOL unavailable: volume confirmation is required';
-    }
-    if (veto == null && paperMinRvol > 0 && rvol != null && rvol < paperMinRvol) {
-      veto = 'weak relative volume (${rvol.toStringAsFixed(2)}x; needs ${paperMinRvol.toStringAsFixed(1)}x)';
-    }
-    if (veto == null && paperMinRvol == 0 && rvol != null && rvol < 0.7) {
-      veto = 'dead volume (${rvol.toStringAsFixed(2)}x average)';
-    }
-    if (veto == null && rvol != null && rvol > 3.0) {
-      veto = 'volume spike may be exhaustion (${rvol.toStringAsFixed(2)}x average)';
-    }
+    if (veto == null && rvol != null && rvol < 0.7) veto = 'dead volume (${rvol.toStringAsFixed(2)}x average)';
+    if (veto == null && rvol != null && rvol > 3.0) veto = 'volume spike may be exhaustion (${rvol.toStringAsFixed(2)}x average)';
     // ---- stretch veto: the Lab's Z-score says price is already stretched against this trade (a SELL into an oversold bounce, a BUY into an overbought run)
     final zs = sigOf(ac, 'Z-score (20)');
     if (veto == null && zs == -side) veto = 'Z-score says price is ${side == 1 ? 'overbought' : 'oversold'}, a ${side == 1 ? 'BUY' : 'SELL'} here chases the move';
@@ -2283,8 +2261,7 @@ class _HomeState extends State<Home> {
     var q = 0, htf = 0;
     if (h1 != null && htfSide(h1) == side) { q++; htf++; }
     if (h2 != null && htfSide(h2) == side) { q++; htf++; }
-    final qRvolMin = paperMinRvol > 0 ? paperMinRvol : 1.2;
-    if (rvol != null && rvol >= qRvolMin && rvol <= 3.0) q++;
+    if (rvol != null && rvol >= 1.2 && rvol <= 3.0) q++;
     if (!ac.adx.isNaN && ac.adx >= 20) q++;
     if (crowdKnown && crowdOk) q++;
     final why = veto ?? (q < paperMinQ ? 'quality $q of 5, needs $paperMinQ' : null);
@@ -2374,7 +2351,7 @@ class _HomeState extends State<Home> {
           cs.last.open, ac.atr, ac.adx, ac.score, ac.sup, ac.res,
         );
         Map<String, dynamic>? q;
-        if (paperMinQ > 0 || paperMinRvol > 0) {
+        if (paperMinQ > 0) {
           if (++qchecked > 40) break;                                  // keep each cycle fast
           q = await qualify(coin, tf, cs, ac);
           if (q == null) continue;
@@ -2665,7 +2642,7 @@ class _HomeState extends State<Home> {
       add(t.score.abs() >= .5 ? 'strong signals (score 0.5+)' : t.score.abs() >= .35 ? 'medium signals (0.35-0.5)' : 'weak signals (0.2-0.35)', t);
       add(t.adx == null ? 'ADX unknown' : t.adx! >= 25 ? 'trending (ADX 25+)' : t.adx! < 20 ? 'ranging (ADX under 20)' : 'moderate trend (ADX 20-25)', t);
       add(t.mood >= 2 ? 'bullish news' : t.mood <= -2 ? 'bearish news' : 'mixed news', t);
-      add(t.quality == 0 ? 'unfiltered trades' : 'quality ${t.quality} of 5', t);
+      add(t.quality == 0 ? 'unfiltered trades' : t.quality >= 4 ? 'quality 4-5' : 'quality 3', t);
     }
     final list = groups.entries.where((e) => e.value.length >= 5).map((e) => MapEntry(e.key, PStats(e.value))).toList()
       ..sort((a, b) => b.value.avgR.compareTo(a.value.avgR));
@@ -4059,13 +4036,13 @@ class _HomeState extends State<Home> {
               const Expanded(child: Text('Auto paper trading', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
               Switch(value: autoPaper, onChanged: setAutoPaper),
             ]),
-            if (autoPaper && (paperMinQ == 0 || paperMinRvol == 0 || paperMinAdx == 0 || paperMinScore < 0.35))
+            if (autoPaper && (paperMinQ == 0 || paperMinAdx == 0 || paperMinScore < 0.35))
               Container(
                 margin: const EdgeInsets.only(top: 6, bottom: 4),
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(color: Colors.orange.withOpacity(.15), borderRadius: BorderRadius.circular(8)),
                 child: const Text('Filters are loosened. With the quality filter Off, late and stretched entries are NOT rejected, and in your own data those entries lost most of the money. '
-                    'Recommended: Strong (0.5), ADX 25, quality 5 of 5, RVOL 1.5x.', style: TextStyle(fontSize: 12)),
+                    'Recommended: Strong (0.5), ADX 25, quality 4 of 5.', style: TextStyle(fontSize: 12)),
               ),
             SwitchListTile(
               dense: true,
@@ -4105,19 +4082,10 @@ class _HomeState extends State<Home> {
               for (final o in const {'Off': 0, '20': 20, '25': 25, '30': 30}.entries)
                 ChoiceChip(label: Text(o.key), selected: paperMinAdx == o.value, onSelected: (_) { setState(() => paperMinAdx = o.value); savePaper(); }),
             ]),
-            const Text('Quality filter (higher timeframes, Bitcoin trend, RVOL, ADX and crowding)', style: TextStyle(fontSize: 12)),
+            const Text('Quality filter (higher timeframes, Bitcoin trend, volume, closed-candle check)', style: TextStyle(fontSize: 12)),
             Wrap(spacing: 8, children: [
-              for (final o in const {'Off': 0, '3 of 5': 3, '4 of 5': 4, '5 of 5': 5}.entries)
+              for (final o in const {'Off': 0, '3 of 5': 3, '4 of 5': 4}.entries)
                 ChoiceChip(label: Text(o.key), selected: paperMinQ == o.value, onSelected: (_) { setState(() => paperMinQ = o.value); savePaper(); }),
-            ]),
-            const SizedBox(height: 6),
-            const Text('Minimum Relative Volume (last closed candle vs previous 20)', style: TextStyle(fontSize: 12)),
-            Wrap(spacing: 8, children: [
-              for (final o in const {'Off': 0.0, '1.2x': 1.2, '1.5x': 1.5, '1.8x': 1.8}.entries)
-                ChoiceChip(label: Text(o.key), selected: paperMinRvol == o.value, onSelected: (_) {
-                  setState(() => paperMinRvol = o.value);
-                  savePaper();
-                }),
             ]),
             if (paperRejected > 0) Text('Filtered out $paperRejected weak setups this session.', style: const TextStyle(fontSize: 11)),
             const Text('Max open trades', style: TextStyle(fontSize: 12)),
