@@ -1719,6 +1719,9 @@ class _HomeState extends State<Home> {
   String labStyle = 'All', labCat = 'All', labStatus = '';
   DateTime? labUpdated;
   Timer? labTimer, uiTimer;
+  final ValueNotifier<int> liveTick = ValueNotifier<int>(0);   // redraws only the live trades table every second when there are many trades
+  int uiTick = 0;
+  int openShown = 30;                                          // rows of the live table shown (Show more adds 30)
   final Map<String, DateTime> paperCheckedAt = {};
 
   @override
@@ -1741,7 +1744,15 @@ class _HomeState extends State<Home> {
       checkPaper();
       paperScanCycle();
     });
-    uiTimer = Timer.periodic(const Duration(seconds: 1), (_) { if (mounted) setState(() {}); });   // refresh every tab each second
+    uiTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      uiTick++;
+      if (!mounted) return;
+      if (trades.length <= 60 || uiTick % 5 == 0) {
+        setState(() {});                 // refresh every tab each second (every 5 s with many trades, to keep the app fast)
+      } else {
+        liveTick.value = uiTick;         // only the live table
+      }
+    });
     liveTimer = Timer.periodic(const Duration(seconds: 3), (_) => refreshLive());                    // current rates for open paper trades
     loadLab();
     labTimer = Timer.periodic(const Duration(seconds: 60), (_) => labCycle());
@@ -1758,6 +1769,7 @@ class _HomeState extends State<Home> {
     paperTimer?.cancel();
     labTimer?.cancel();
     uiTimer?.cancel();
+    liveTick.dispose();
     liveTimer?.cancel();
     paperAmountCtl.dispose();
     ofCoinCtl.dispose();
@@ -2320,7 +2332,7 @@ class _HomeState extends State<Home> {
       var opened = 0, rejected = 0, qchecked = 0;
       paperSignals += cands.length;
       for (final m in cands) {
-        if (trades.where((t) => t.isOpen && t.source == 'auto').length >= paperMaxOpen) break;   // manual trades do not use up the auto limit
+        if (trades.where((t) => t.isOpen && (t.source == 'auto' || t.source == 'MR')).length >= paperMaxOpen) break;   // manual trades do not use up the auto limit
         final coin = m['coin'] as String, tf = m['tf'] as String;
         final ac = m['ac'] as Analysis;
         final cs = m['cs'] as List<Candle>;
@@ -2449,7 +2461,7 @@ class _HomeState extends State<Home> {
       final byCoin = <String, List<AppTrade>>{};
       for (final t in open) {
         final last = paperCheckedAt[t.coin];
-        if (last != null && DateTime.now().difference(last).inSeconds < 10) continue;   // per-coin pause keeps us inside the exchange rate limit
+        if (last != null && DateTime.now().difference(last).inSeconds < (open.length > 60 ? 60 : 10)) continue;   // per-coin pause keeps us inside the exchange rate limit and the app fast
         byCoin.putIfAbsent(t.coin, () => []).add(t);
       }
       if (byCoin.isEmpty) { paperBusy = false; return; }
@@ -3739,7 +3751,7 @@ class _HomeState extends State<Home> {
       );
 
   /// Live table of open paper trades with the current market rate, P&L and a summary strip.
-  Widget liveBoard(List<AppTrade> open) => Builder(builder: (ctx) => liveBoardIn(open, ctx));
+  Widget liveBoard(List<AppTrade> open) => ValueListenableBuilder<int>(valueListenable: liveTick, builder: (_, __, ___) => Builder(builder: (ctx) => liveBoardIn(open, ctx)));
 
   Widget liveBoardIn(List<AppTrade> allOpen, BuildContext ctx) {
     Color rc(double v) => v >= 0 ? Colors.green : Colors.red;
@@ -3887,10 +3899,16 @@ class _HomeState extends State<Home> {
               DataColumn(label: Text('TP progress')), DataColumn(label: Text('SL distance')), DataColumn(label: Text('Status')),
               DataColumn(label: Text('Open for')), DataColumn(label: Text('Stop trade')),
             ],
-            rows: [for (final t in open.take(150)) row(t)],
+            rows: [for (final t in open.take(openShown)) row(t)],
           ),
         ),
       ),
+      if (open.length > 30)
+        Row(children: [
+          if (open.length > openShown)
+            TextButton(onPressed: () => setState(() => openShown += 30), child: Text('Show 30 more (${open.length - openShown} hidden)')),
+          if (openShown > 30) TextButton(onPressed: () => setState(() => openShown = 30), child: const Text('Show less')),
+        ]),
       const Padding(
         padding: EdgeInsets.fromLTRB(4, 2, 4, 0),
         child: Text('Rates are polled every 3 seconds (not a WebSocket stream). Binance coins use the best bid/ask: a BUY is valued at the bid and a SELL at the ask, minus the 0.05R fee. '
@@ -4090,7 +4108,7 @@ class _HomeState extends State<Home> {
             if (paperRejected > 0) Text('Filtered out $paperRejected weak setups this session.', style: const TextStyle(fontSize: 11)),
             const Text('Max open trades', style: TextStyle(fontSize: 12)),
             Wrap(spacing: 8, children: [
-              for (final n in [20, 50, 100, 1000000])
+              for (final n in [20, 50, 100, 200, 500, 1000000])
                 ChoiceChip(label: Text(n >= 1000000 ? 'No limit' : '$n'), selected: paperMaxOpen == n, onSelected: (_) { setState(() => paperMaxOpen = n); savePaper(); }),
             ]),
             const SizedBox(height: 8),
