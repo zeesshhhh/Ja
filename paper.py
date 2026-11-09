@@ -10,7 +10,14 @@ import math
 import os
 import tempfile
 import pandas as pd
-from config import PAPER_START, PAPER_RISK, PAPER_AMOUNT, PAPER_MAX_OPEN, PAPER_MAX_PER_SIDE
+import config as _cfg
+
+PAPER_START = _cfg.PAPER_START
+PAPER_RISK = _cfg.PAPER_RISK
+# optional settings: an older config.py without them still works (no fixed amount, no trade limits)
+PAPER_AMOUNT = getattr(_cfg, "PAPER_AMOUNT", None)
+PAPER_MAX_OPEN = getattr(_cfg, "PAPER_MAX_OPEN", None)
+PAPER_MAX_PER_SIDE = getattr(_cfg, "PAPER_MAX_PER_SIDE", None)
 
 FILE, OLD_FILE, CSV_FILE = "docs/paper.json", "paper.json", "docs/paper_log.csv"
 COST_R = 0.05
@@ -111,7 +118,10 @@ def write_csv(p):
         records = [(int(t.get("id", 0) or 0), "closed", t) for t in p.get("closed", [])]
         records += [(int(t.get("id", 0) or 0), "open", t) for t in p.get("open", [])]
         for _, status, trade in sorted(records, key=lambda x: x[0]):
-            w.writerow(_row(trade, status))
+            try:
+                w.writerow(_row(trade, status))
+            except Exception as e:        # one damaged record must never stop the ledger from saving
+                print(f"paper_log: skipped trade id={trade.get('id') if isinstance(trade, dict) else '?'}: {e}")
     _atomic_write(CSV_FILE, write)
 
 
@@ -148,7 +158,7 @@ def open_pos(p, symbol, s):
     p["open"].append({"id": p["next_id"], "symbol": symbol, "strategy": s.get("strategy", "Unknown"), "tf": s.get("tf"), "grade": s.get("grade"),
                       "side": side, "entry": entry, "sl": sl, "tp": tp, "units": risk_cash / risk,
                       "risk": risk_cash, "opened": pd.Timestamp.now(tz="UTC").isoformat(), "hold_h": s.get("hold_h", 72),
-                      "style": s.get("style"), "why": s.get("why"), "ctx": s.get("ctx", {}), "mfe_r": 0.0, "mae_r": 0.0})
+                      "style": s.get("style"), "why": s.get("why"), "ctx": s.get("ctx") or {}, "mfe_r": 0.0, "mae_r": 0.0})
     return True
 
 
@@ -206,7 +216,9 @@ def report(p):
              f"{len(p.get('open', []))} open, {len(c)} closed"]
     by = {}
     for t in c:
-        by.setdefault(t["strategy"], []).append(t["r"])
+        if t.get("r") is None:          # skip damaged records instead of crashing the run
+            continue
+        by.setdefault(t.get("strategy") or "unknown", []).append(t["r"])
     for k, v in sorted(by.items(), key=lambda kv: -sum(kv[1])):
         lines.append(f"• {k}: {len(v)} trades, {100 * sum(r > 0 for r in v) / len(v):.0f}% wins, {sum(v):+.1f}R")
     return "\n".join(lines)
@@ -215,7 +227,9 @@ def report(p):
 def summary(p):
     by = {}
     for t in p.get("closed", []):
-        by.setdefault(t["strategy"], []).append(t["r"])
+        if t.get("r") is None:          # skip damaged records instead of crashing the run
+            continue
+        by.setdefault(t.get("strategy") or "unknown", []).append(t["r"])
     return {"equity": round(p["equity"], 2), "start": PAPER_START, "open": len(p.get("open", [])), "closed": len(p.get("closed", [])),
             "strategies": [{"name": k, "trades": len(v), "win": round(100 * sum(r > 0 for r in v) / len(v)), "r": round(sum(v), 1)}
                            for k, v in sorted(by.items(), key=lambda kv: -sum(kv[1]))]}
